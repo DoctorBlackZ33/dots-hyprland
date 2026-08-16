@@ -1,26 +1,55 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+script_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+repo_root="${END4_REPO_ROOT:-$script_root}"
+if ! repo_root="$(cd -- "$repo_root" 2>/dev/null && pwd -P)"; then
+    printf 'end4: repository path does not exist: %s\n' "$repo_root" >&2
+    exit 1
+fi
+
 user_home="${HOME:?HOME is required}"
 config_root="${XDG_CONFIG_HOME:-$user_home/.config}"
 data_root="${XDG_DATA_HOME:-$user_home/.local/share}"
-upstream_ref="upstream/main"
+upstream_ref="${END4_UPSTREAM_REF:-upstream/main}"
+
+assume_yes=false
+device_name=''
+device_selection_set=false
+dry_run=false
+force_apply=false
+prune=false
+prompt_for_device=false
+from_lazygit="${END4_FROM_LAZYGIT:-0}"
 
 usage() {
     cat <<'EOF'
-Usage: ./end4 <command> [options]
+Usage: end4 <command> [options]
 
-Git workflow:
+Unified system workflow:
+  system                         Open the end-4 maintenance menu
+  merge [--yes]                  Fetch upstream and prepare a reviewed merge
+  update [options]               Preview, confirm, and deploy committed config
+  discard [--yes]                Abort merge and discard uncommitted changes
+  tui                            Open LazyGit for this repository
+
+System update options:
+  --device NAME                  Apply General plus a named device overlay
+  --general                      Apply the General configuration only
+  --prune                        Explicitly remove extras in upstream-managed dirs
+  --dry-run                      Show the deployment plan without changing files
+  --yes                          Skip the confirmation prompt (automation only)
+
+Other commands:
   status                         Show custom-vs-upstream Git state
-  update                         Fetch upstream and start a reviewed merge
   check                          Validate scripts and configuration syntax
-
-Deployment:
-  apply [--device NAME]          Preview, confirm, and deploy committed config
-  apply --dry-run [--device NAME]
-  apply --force [--device NAME]  Deploy without the confirmation prompt
+  apply [options]                Compatibility deployment command
   bootstrap [setup options...]   Run the upstream dependency/full installer
+
+Normal flow:
+  system merge                   Review upstream changes in LazyGit
+  system update                  Dry-run, choose a device, then deploy
+  system discard                 Abort a merge or discard active uncommitted work
 EOF
 }
 
@@ -42,19 +71,74 @@ require_clean_worktree() {
     status_output="$(git_at_repo status --porcelain)"
     if [[ -n "$status_output" ]]; then
         printf '%s\n' "$status_output"
-        die "working tree is not clean; commit or intentionally discard these changes first"
+        die 'working tree is not clean; commit or intentionally discard these changes first'
     fi
 }
 
 require_no_merge() {
     if git_at_repo rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
-        die "a merge is already in progress; resolve it or run git merge --abort"
+        die 'a merge is already in progress; resolve it or run system discard'
     fi
 }
 
 require_upstream_ref() {
     git_at_repo show-ref --verify --quiet "refs/remotes/$upstream_ref" || \
-        die "missing $upstream_ref; run git fetch upstream"
+        die "missing $upstream_ref; run system merge to fetch upstream"
+}
+
+has_interactive_tty() {
+    [[ -t 0 && -t 1 ]]
+}
+
+has_whiptail_tty() {
+    has_interactive_tty && [[ "${TERM:-}" != dumb ]] && command -v whiptail >/dev/null 2>&1
+}
+
+confirm_action() {
+    local prompt="$1"
+    [[ "$assume_yes" == true ]] && return 0
+
+    if has_whiptail_tty; then
+        whiptail --title 'end-4 system' --yesno "$prompt" 12 82
+        return $?
+    fi
+
+    if ! has_interactive_tty; then
+        die 'confirmation requires an interactive terminal; use --yes only for intentional automation'
+    fi
+
+    local response
+    read -r -p "$prompt [y/N] " response < /dev/tty
+    [[ "$response" =~ ^[Yy]([Ee][Ss])?$ ]]
+}
+
+typed_discard_confirmation() {
+    [[ "$assume_yes" == true ]] && return 0
+
+    local response
+    if has_whiptail_tty; then
+        response="$(whiptail --title 'Discard local Git state' \
+            --inputbox 'This removes the active merge, uncommitted tracked changes, and untracked non-ignored files.\n\nType DISCARD to continue.' \
+            14 82 '' 3>&1 1>&2 2>&3)" || return 1
+    else
+        if ! has_interactive_tty; then
+            die 'discard requires typing DISCARD in an interactive terminal; use --yes only for intentional automation'
+        fi
+        printf '\nThis removes the active merge, uncommitted tracked changes, and untracked non-ignored files.\n'
+        printf 'Type DISCARD to continue: '
+        read -r response < /dev/tty
+    fi
+
+    [[ "$response" == DISCARD ]]
+}
+
+show_paged_report() {
+    local report_file="$1"
+    if has_interactive_tty && command -v less >/dev/null 2>&1; then
+        less -R -- "$report_file"
+    else
+        cat -- "$report_file"
+    fi
 }
 
 print_git_status() {
@@ -73,19 +157,79 @@ print_git_status() {
         printf '\nIncoming commits currently known locally:\n'
         git_at_repo log --oneline "HEAD..$upstream_ref" || true
     else
-        printf '\nNo local upstream tracking ref. Run: git fetch upstream\n'
+        printf '\nNo local upstream tracking ref. Run: system merge\n'
     fi
 
     printf '\nLive deployment differences are available with:\n'
-    printf '  ./end4 apply --dry-run\n'
+    printf '  system update --dry-run\n'
 }
 
-update_upstream() {
+print_merge_state() {
+    if git_at_repo rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+        printf '\nMerge is still in progress. Unresolved files:\n'
+        local unresolved
+        unresolved="$(git_at_repo diff --name-only --diff-filter=U || true)"
+        if [[ -n "$unresolved" ]]; then
+            printf '%s\n' "$unresolved"
+            printf '\nUse LazyGit to choose ours, theirs, both, or edit each conflict.\n'
+        else
+            printf '%s\n' '(none; stage resolved files, then commit the merge when ready)'
+        fi
+        git_at_repo status --short
+    else
+        printf '\nNo merge is in progress. The prepared changes remain uncommitted until you commit them.\n'
+        git_at_repo status --short
+    fi
+}
+
+write_incoming_report() {
+    local report_file="$1"
+    {
+        printf 'end-4 upstream merge preview\n'
+        printf 'Repository: %s\n' "$repo_root"
+        printf 'Local HEAD: %s\n' "$(git_at_repo log -1 --format='%h %s')"
+        printf 'Upstream:   %s\n\n' "$(git_at_repo log -1 --format='%h %s' "$upstream_ref")"
+
+        printf '%s\n' 'Incoming commits (HEAD..upstream/main):'
+        git_at_repo log --oneline --decorate "HEAD..$upstream_ref"
+        printf '\n%s\n' 'Incoming file summary:'
+        git_at_repo diff --stat HEAD "$upstream_ref"
+        printf '\n%s\n' 'Full incoming diff:'
+        git_at_repo diff --color=always HEAD "$upstream_ref"
+    } > "$report_file"
+}
+
+run_lazygit() {
+    local repo_lazygit_config="$repo_root/local/.config/lazygit/config.yml"
+    if [[ -f "$repo_lazygit_config" ]]; then
+        lazygit --path "$repo_root" --use-config-file "$repo_lazygit_config" "$@"
+    else
+        lazygit --path "$repo_root" "$@"
+    fi
+}
+
+launch_lazygit_review() {
+    if [[ "$from_lazygit" == 1 ]]; then
+        return 0
+    fi
+    if ! has_interactive_tty; then
+        printf 'LazyGit review was not launched because this is not an interactive terminal.\n'
+        return 0
+    fi
+    if ! command -v lazygit >/dev/null 2>&1; then
+        printf 'LazyGit is not installed; inspect the merge with git status/git diff, or install LazyGit.\n' >&2
+        return 0
+    fi
+    printf '\nOpening LazyGit for merge review. Exit LazyGit when you are done resolving or inspecting.\n'
+    run_lazygit || printf 'end4: warning: LazyGit exited with a non-zero status\n' >&2
+}
+
+merge_upstream() {
     require_clean_worktree
     require_no_merge
 
     printf 'Fetching upstream...\n'
-    git_at_repo fetch --prune upstream
+    git_at_repo fetch --prune upstream || die 'unable to fetch upstream'
     require_upstream_ref
 
     local incoming_count
@@ -95,20 +239,118 @@ update_upstream() {
         return 0
     fi
 
-    printf '\nIncoming commits:\n'
-    git_at_repo log --oneline "HEAD..$upstream_ref"
-    printf '\nIncoming file changes:\n'
-    git_at_repo diff --stat HEAD "$upstream_ref"
-    printf '\nStarting a non-committing merge. Review it before committing.\n'
+    local report_file
+    report_file="$(mktemp "${TMPDIR:-/tmp}/end4-merge-report.XXXXXX")"
+    write_incoming_report "$report_file"
+    printf '\nIncoming changes are shown below.\n\n'
+    show_paged_report "$report_file" || true
 
+    if ! confirm_action 'Start a non-committing merge of upstream/main into this fork?'; then
+        rm -f -- "$report_file"
+        printf 'Merge cancelled.\n'
+        return 0
+    fi
+    rm -f -- "$report_file"
+
+    printf '\nStarting a non-committing merge.\n'
+    local merge_status=0
     if git_at_repo merge --no-ff --no-commit "$upstream_ref"; then
-        printf '\nMerge prepared but not committed. Review with:\n'
-        printf '  git diff --cached\n  ./end4 check\n'
-        printf '\nFinish with:\n  git commit -m "Merge upstream/main into custom main"\n'
+        printf '\nMerge prepared and left uncommitted.\n'
     else
-        printf '\nMerge stopped with conflicts. Resolve, git add the files, then run ./end4 check and git commit.\n'
-        printf 'Abort with:\n  git merge --abort\n'
-        return 1
+        merge_status=$?
+        printf '\nMerge stopped with conflicts.\n' >&2
+    fi
+
+    launch_lazygit_review
+    print_merge_state
+
+    if [[ "$merge_status" -ne 0 ]]; then
+        printf '\nResolve conflicts in LazyGit, stage the resolved files, and commit when ready.\n' >&2
+        printf 'To abandon the merge safely: system discard\n' >&2
+        return "$merge_status"
+    fi
+
+    printf '\nReview with LazyGit or git diff --cached, then run system check and commit the merge.\n'
+}
+
+device_is_known() {
+    local candidate="$1"
+    local known
+    [[ -n "$candidate" && "$candidate" != */* && "$candidate" != . && "$candidate" != .. ]] || return 1
+    [[ -d "$repo_root/devices/$candidate/.config" ]] || return 1
+    while IFS= read -r known; do
+        [[ "$known" == "$candidate" ]] && return 0
+    done < <(find "$repo_root/devices" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort)
+    return 1
+}
+
+normalize_device() {
+    local requested="$1"
+    case "$requested" in
+        ''|general|General|none|None)
+            device_name=''
+            device_selection_set=true
+            ;;
+        *)
+            device_is_known "$requested" || die "unknown device overlay: $requested"
+            device_name="$requested"
+            device_selection_set=true
+            ;;
+    esac
+}
+
+choose_device() {
+    [[ "$device_selection_set" == true ]] && return 0
+
+    if ! has_interactive_tty; then
+        die 'system update needs a device choice; use --general or --device NAME when no menu is available'
+    fi
+
+    local selected=''
+    if has_whiptail_tty; then
+        local -a menu_args=(general 'General only')
+        local known
+        while IFS= read -r known; do
+            menu_args+=("$known" "General plus $known overlay")
+        done < <(find "$repo_root/devices" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort)
+        selected="$(whiptail --title 'Choose deployment target' \
+            --menu 'Select the general configuration or a device overlay:' \
+            18 88 8 "${menu_args[@]}" 3>&1 1>&2 2>&3)" || die 'device selection cancelled'
+    else
+        printf '\nDeployment targets:\n'
+        printf '  1) General only\n'
+        local -a names=()
+        local known index=2
+        while IFS= read -r known; do
+            names+=("$known")
+            printf '  %d) General plus %s\n' "$index" "$known"
+            index=$((index + 1))
+        done < <(find "$repo_root/devices" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort)
+        local choice
+        read -r -p 'Choose a target [1]: ' choice < /dev/tty
+        choice="${choice:-1}"
+        if [[ "$choice" == 1 ]]; then
+            selected=general
+        elif [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 2 && choice < index )); then
+            selected="${names[choice-2]}"
+        else
+            die 'invalid device selection'
+        fi
+    fi
+
+    normalize_device "$selected"
+    if [[ -n "$device_name" ]]; then
+        printf 'Selected deployment target: General + %s\n' "$device_name"
+    else
+        printf 'Selected deployment target: General only\n'
+    fi
+}
+
+upstream_sync_mode() {
+    if [[ "$prune" == true ]]; then
+        printf 'delete'
+    else
+        printf 'keep'
     fi
 }
 
@@ -117,17 +359,37 @@ preview_dir() {
     local source_dir="$2"
     local target_dir="$3"
     shift 3
+    [[ -d "$source_dir" ]] || { printf '\nwarning: source directory is missing: %s\n' "$source_dir" >&2; return 0; }
+    if [[ -e "$target_dir" && ! -d "$target_dir" ]]; then
+        printf '\nwarning: target exists but is not a directory: %s\n' "$target_dir" >&2
+        return 0
+    fi
+
+    local comparison_target="$target_dir"
+    local temporary_target=''
+    if [[ ! -d "$target_dir" ]]; then
+        temporary_target="$(mktemp -d "${TMPDIR:-/tmp}/end4-preview.XXXXXX")"
+        comparison_target="$temporary_target"
+        printf '\ncreate directory %s\n' "$target_dir"
+    fi
+
     local rsync_args=(-ani --checksum --no-times --human-readable)
     [[ "$mode" == delete ]] && rsync_args+=(--delete)
-    printf '\n%s -> %s\n' "$source_dir" "$target_dir"
-    rsync "${rsync_args[@]}" "$@" "$source_dir/" "$target_dir/" || true
+    printf '\n%s -> %s (%s upstream policy)\n' "$source_dir" "$target_dir" "$mode"
+    rsync "${rsync_args[@]}" "$@" "$source_dir/" "$comparison_target/" || true
+    if [[ -n "$temporary_target" ]]; then
+        rmdir -- "$temporary_target"
+    fi
 }
 
 preview_file() {
     local source_file="$1"
     local target_file="$2"
+    [[ -f "$source_file" ]] || { printf '\nwarning: source file is missing: %s\n' "$source_file" >&2; return 0; }
     if [[ ! -e "$target_file" ]]; then
         printf '\ncreate %s\n' "$target_file"
+    elif [[ -d "$target_file" ]]; then
+        printf '\nwarning: target exists as a directory: %s\n' "$target_file" >&2
     elif ! cmp -s "$source_file" "$target_file"; then
         printf '\nupdate %s\n' "$target_file"
         diff -u "$target_file" "$source_file" || true
@@ -139,8 +401,9 @@ sync_dir() {
     local source_dir="$2"
     local target_dir="$3"
     shift 3
+    [[ -d "$source_dir" ]] || die "source directory is missing: $source_dir"
     mkdir -p "$target_dir"
-    local rsync_args=(-a)
+    local rsync_args=(-a --checksum --no-times)
     [[ "$mode" == delete ]] && rsync_args+=(--delete)
     rsync "${rsync_args[@]}" "$@" "$source_dir/" "$target_dir/"
 }
@@ -148,6 +411,7 @@ sync_dir() {
 sync_file() {
     local source_file="$1"
     local target_file="$2"
+    [[ -f "$source_file" ]] || die "source file is missing: $source_file"
     mkdir -p "$(dirname "$target_file")"
     cp -p "$source_file" "$target_file"
 }
@@ -169,7 +433,7 @@ preview_entry() {
     local source_entry="$1"
     local target_entry="$2"
     if [[ -d "$source_entry" ]]; then
-        preview_dir delete "$source_entry" "$target_entry"
+        preview_dir "$(upstream_sync_mode)" "$source_entry" "$target_entry"
     else
         preview_file "$source_entry" "$target_entry"
     fi
@@ -179,7 +443,7 @@ sync_entry() {
     local source_entry="$1"
     local target_entry="$2"
     if [[ -d "$source_entry" ]]; then
-        sync_dir delete "$source_entry" "$target_entry"
+        sync_dir "$(upstream_sync_mode)" "$source_entry" "$target_entry"
     else
         sync_file "$source_entry" "$target_entry"
     fi
@@ -187,12 +451,12 @@ sync_entry() {
 
 preview_upstream_files() {
     for_each_upstream_misc preview_entry
-    preview_dir delete "$repo_root/dots/.config/quickshell" "$config_root/quickshell"
-    preview_dir delete "$repo_root/dots/.config/fish" "$config_root/fish" --exclude=conf.d
-    preview_dir delete "$repo_root/dots/.config/fontconfig" "$config_root/fontconfig"
-    preview_dir delete "$repo_root/dots/.config/hypr/hyprland" "$config_root/hypr/hyprland"
-    preview_dir delete "$repo_root/dots/.config/hypr/custom" "$config_root/hypr/custom"
-    preview_dir delete "$repo_root/dots/.config/kitty" "$config_root/kitty"
+    preview_dir "$(upstream_sync_mode)" "$repo_root/dots/.config/quickshell" "$config_root/quickshell"
+    preview_dir "$(upstream_sync_mode)" "$repo_root/dots/.config/fish" "$config_root/fish" --exclude=conf.d
+    preview_dir "$(upstream_sync_mode)" "$repo_root/dots/.config/fontconfig" "$config_root/fontconfig"
+    preview_dir "$(upstream_sync_mode)" "$repo_root/dots/.config/hypr/hyprland" "$config_root/hypr/hyprland"
+    preview_dir "$(upstream_sync_mode)" "$repo_root/dots/.config/hypr/custom" "$config_root/hypr/custom"
+    preview_dir "$(upstream_sync_mode)" "$repo_root/dots/.config/kitty" "$config_root/kitty"
     preview_file "$repo_root/dots/.config/hypr/hyprland.lua" "$config_root/hypr/hyprland.lua"
     preview_file "$repo_root/dots/.config/hypr/hyprlock.conf" "$config_root/hypr/hyprlock.conf"
     preview_file "$repo_root/dots/.config/hypr/hypridle.conf" "$config_root/hypr/hypridle.conf"
@@ -214,14 +478,24 @@ preview_local_overlay() {
 }
 
 preview_device_overlay() {
-    local device_name="$1"
-    [[ -n "$device_name" ]] || return 0
-    local device_config="$repo_root/devices/$device_name/.config"
-    [[ -d "$device_config" ]] || die "device overlay not found: devices/$device_name/.config"
+    local selected_device="$1"
+    [[ -n "$selected_device" ]] || return 0
+    local device_config="$repo_root/devices/$selected_device/.config"
+    [[ -d "$device_config" ]] || die "device overlay not found: devices/$selected_device/.config"
     preview_dir keep "$device_config" "$config_root"
 }
 
 preview_deployment() {
+    if [[ -n "$device_name" ]]; then
+        printf '\nDeployment target: General + %s\n' "$device_name"
+    else
+        printf '\nDeployment target: General only\n'
+    fi
+    if [[ "$prune" == true ]]; then
+        printf 'Upstream directory policy: prune extras (explicit)\n'
+    else
+        printf 'Upstream directory policy: preserve live extras (safe default)\n'
+    fi
     preview_upstream_files
     preview_local_overlay
     preview_device_overlay "$device_name"
@@ -229,12 +503,12 @@ preview_deployment() {
 
 sync_upstream_files() {
     for_each_upstream_misc sync_entry
-    sync_dir delete "$repo_root/dots/.config/quickshell" "$config_root/quickshell"
-    sync_dir delete "$repo_root/dots/.config/fish" "$config_root/fish" --exclude=conf.d
-    sync_dir delete "$repo_root/dots/.config/fontconfig" "$config_root/fontconfig"
-    sync_dir delete "$repo_root/dots/.config/hypr/hyprland" "$config_root/hypr/hyprland"
-    sync_dir delete "$repo_root/dots/.config/hypr/custom" "$config_root/hypr/custom"
-    sync_dir delete "$repo_root/dots/.config/kitty" "$config_root/kitty"
+    sync_dir "$(upstream_sync_mode)" "$repo_root/dots/.config/quickshell" "$config_root/quickshell"
+    sync_dir "$(upstream_sync_mode)" "$repo_root/dots/.config/fish" "$config_root/fish" --exclude=conf.d
+    sync_dir "$(upstream_sync_mode)" "$repo_root/dots/.config/fontconfig" "$config_root/fontconfig"
+    sync_dir "$(upstream_sync_mode)" "$repo_root/dots/.config/hypr/hyprland" "$config_root/hypr/hyprland"
+    sync_dir "$(upstream_sync_mode)" "$repo_root/dots/.config/hypr/custom" "$config_root/hypr/custom"
+    sync_dir "$(upstream_sync_mode)" "$repo_root/dots/.config/kitty" "$config_root/kitty"
     sync_file "$repo_root/dots/.config/hypr/hyprland.lua" "$config_root/hypr/hyprland.lua"
     sync_file "$repo_root/dots/.config/hypr/hyprlock.conf" "$config_root/hypr/hyprlock.conf"
     sync_file "$repo_root/dots/.config/hypr/hypridle.conf" "$config_root/hypr/hypridle.conf"
@@ -256,10 +530,10 @@ apply_local_overlay() {
 }
 
 apply_device_overlay() {
-    local device_name="$1"
-    [[ -n "$device_name" ]] || return 0
-    local device_config="$repo_root/devices/$device_name/.config"
-    [[ -d "$device_config" ]] || die "device overlay not found: devices/$device_name/.config"
+    local selected_device="$1"
+    [[ -n "$selected_device" ]] || return 0
+    local device_config="$repo_root/devices/$selected_device/.config"
+    [[ -d "$device_config" ]] || die "device overlay not found: devices/$selected_device/.config"
     sync_dir keep "$device_config" "$config_root"
 }
 
@@ -355,6 +629,7 @@ run_checks() {
 apply_configs() {
     require_clean_worktree
     require_no_merge
+    [[ "$prompt_for_device" == true ]] && choose_device
     run_checks
 
     preview_deployment
@@ -362,32 +637,173 @@ apply_configs() {
         return 0
     fi
 
+    local prompt='Apply these committed files to the live configuration?'
+    if [[ "$prune" == true ]]; then
+        prompt='Apply these files and prune extras in upstream-managed directories?'
+    fi
     if [[ "$force_apply" != true ]]; then
-        if [[ ! -t 0 ]]; then
-            die 'deployment requires a terminal confirmation; use --force for automation'
+        if ! confirm_action "$prompt"; then
+            printf 'Deployment cancelled.\n'
+            return 0
         fi
-        read -r -p $'\nApply these committed files to the live configuration? [y/N] ' response
-        [[ "$response" =~ ^[Yy]$ ]] || { printf 'Deployment cancelled.\n'; return 0; }
     fi
 
     run_deployment
     printf 'end4: deployment complete\n'
 }
 
-device_name=''
-dry_run=false
-force_apply=false
-command_name="${1:-status}"
+system_update() {
+    prompt_for_device=true
+    apply_configs
+}
+
+discard_local_state() {
+    require_repo
+    local status_output clean_preview
+    status_output="$(git_at_repo status --short)"
+    local merge_in_progress=false
+    if git_at_repo rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+        merge_in_progress=true
+    fi
+
+    if [[ -z "$status_output" && "$merge_in_progress" == false ]]; then
+        printf 'Nothing uncommitted to discard. Committed custom history was not changed.\n'
+        return 0
+    fi
+
+    printf 'Current Git state:\n'
+    git_at_repo status --short --branch
+    clean_preview="$(git_at_repo clean -fdn)"
+    if [[ -n "$clean_preview" ]]; then
+        printf '\nUntracked non-ignored files that would be removed:\n%s\n' "$clean_preview"
+    else
+        printf '\nNo untracked non-ignored files would be removed.\n'
+    fi
+    printf '\nCommitted history will be preserved.\n'
+
+    if ! typed_discard_confirmation; then
+        printf 'Discard cancelled.\n'
+        return 0
+    fi
+
+    if [[ "$merge_in_progress" == true ]]; then
+        printf 'Aborting active merge...\n'
+        git_at_repo merge --abort || die 'merge abort failed; no reset or clean was performed'
+    fi
+
+    git_at_repo reset --hard HEAD
+    git_at_repo clean -fd
+    printf 'Discard complete. Ignored files and committed history were preserved.\n'
+    git_at_repo status --short --branch
+}
+
+system_tui() {
+    require_repo
+    command -v lazygit >/dev/null 2>&1 || die 'LazyGit is not installed; install it or use the Git command line'
+    run_lazygit
+}
+
+system_menu() {
+    require_repo
+    local selected=''
+    if has_whiptail_tty; then
+        selected="$(whiptail --title 'end-4 system maintenance' \
+            --menu 'Choose an operation:' 18 86 8 \
+            merge 'Fetch and review upstream changes' \
+            update 'Preview and deploy committed configuration' \
+            discard 'Abort merge and discard uncommitted Git state' \
+            tui 'Open the repository in LazyGit' \
+            quit 'Return without changing anything' \
+            3>&1 1>&2 2>&3)" || return 0
+    else
+        if ! has_interactive_tty; then
+            die 'the system menu requires an interactive terminal; use system merge/update/discard/tui directly'
+        fi
+        printf '\nend-4 system maintenance\n\n'
+        printf '  1) merge    Fetch and review upstream changes\n'
+        printf '  2) update   Preview and deploy committed configuration\n'
+        printf '  3) discard  Abort merge and discard uncommitted Git state\n'
+        printf '  4) tui      Open the repository in LazyGit\n'
+        printf '  5) quit     Return without changing anything\n'
+        local choice
+        read -r -p 'Choose an operation [5]: ' choice < /dev/tty
+        case "${choice:-5}" in
+            1) selected=merge ;;
+            2) selected=update ;;
+            3) selected=discard ;;
+            4) selected=tui ;;
+            5) selected=quit ;;
+            *) die 'invalid menu selection' ;;
+        esac
+    fi
+
+    case "$selected" in
+        merge) merge_upstream ;;
+        update) system_update ;;
+        discard) discard_local_state ;;
+        tui) system_tui ;;
+        quit|'') printf 'No changes made.\n' ;;
+        *) die "unknown menu selection: $selected" ;;
+    esac
+}
+
+command_name="${1:-menu}"
 shift || true
+if [[ "$command_name" == system ]]; then
+    command_name="${1:-menu}"
+    shift || true
+fi
 
 case "$command_name" in
     status|report)
         require_repo
         print_git_status
         ;;
-    update)
+    merge)
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --yes) assume_yes=true; shift ;;
+                -h|--help) usage; exit 0 ;;
+                *) die "unknown merge option: $1" ;;
+            esac
+        done
         require_repo
-        update_upstream
+        merge_upstream
+        ;;
+    update)
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --device)
+                    [[ $# -ge 2 ]] || die '--device requires a name'
+                    normalize_device "$2"
+                    shift 2
+                    ;;
+                --general) normalize_device general; shift ;;
+                --prune) prune=true; shift ;;
+                --dry-run) dry_run=true; shift ;;
+                --yes) assume_yes=true; shift ;;
+                -h|--help) usage; exit 0 ;;
+                *) die "unknown update option: $1" ;;
+            esac
+        done
+        require_repo
+        system_update
+        ;;
+    discard)
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --yes) assume_yes=true; shift ;;
+                -h|--help) usage; exit 0 ;;
+                *) die "unknown discard option: $1" ;;
+            esac
+        done
+        discard_local_state
+        ;;
+    menu)
+        system_menu
+        ;;
+    tui)
+        system_tui
         ;;
     check)
         require_repo
@@ -402,13 +818,15 @@ case "$command_name" in
             case "$1" in
                 --device)
                     [[ $# -ge 2 ]] || die '--device requires a name'
-                    device_name="$2"
+                    normalize_device "$2"
                     shift 2
                     ;;
+                --general) normalize_device general; shift ;;
                 --dry-run) dry_run=true; shift ;;
                 --force) force_apply=true; shift ;;
+                --prune) prune=true; shift ;;
                 -h|--help) usage; exit 0 ;;
-                *) die "unknown apply option: $1" ;;
+                *) die "unknown apply option: $1" ;
             esac
         done
         require_repo

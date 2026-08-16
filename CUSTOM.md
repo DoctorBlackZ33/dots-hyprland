@@ -15,28 +15,57 @@ The `local/` tree contains partial personal configuration that must not be
 treated as a complete upstream directory. It is applied additively by
 `./end4 apply`.
 
-## Daily workflow
+## Unified system workflow
 
 ```bash
-cd /home/black/end4_custom
-./end4 status
-./end4 update
+system
 ```
 
-`end4 update` fetches `upstream/main` and starts a non-committing merge. It
-never stashes work or installs files. Review the staged merge, resolve any
-conflicts, and commit it:
+The menu offers four operations:
+
+- `merge`: fetch `upstream/main`, show the complete incoming commit/file diff,
+  and prepare a non-committing Git merge.
+- `update`: run checks, show a deployment dry-run, ask for a target device, and
+  deploy only after confirmation.
+- `discard`: after a typed `DISCARD` confirmation, abort an active merge,
+  reset uncommitted tracked changes, and remove untracked non-ignored files.
+- `tui`: open this repository in LazyGit.
+
+The direct equivalents are:
 
 ```bash
-git diff --cached
-git restore --ours -- path/to/file       # keep this fork
-git restore --theirs -- path/to/file     # keep upstream
+system merge
+system update
+system update --dry-run
+system discard
+system tui
+```
+
+The installed `update` command is now a compatibility alias for
+`system update`; it no longer stashes, pulls, runs `setup install`, or replaces
+files from an external cache.
+
+## Reviewing an upstream merge
+
+`system merge` requires a clean worktree, fetches upstream, displays the full
+incoming report, and leaves the merge uncommitted. LazyGit is opened for the
+review when it is available. Its conflict view lets you resolve each file/hunk
+by choosing ours (this fork), theirs (upstream), both, or opening an editor for
+manual resolution. The merge is never committed automatically.
+
+After resolving conflicts:
+
+```bash
+git status
+system check
 git add path/to/file
-./end4 check
 git commit -m "Merge upstream/main into custom main"
 ```
 
-Abort an unwanted merge with `git merge --abort`.
+You can abandon the entire active merge with `system discard`. Committed custom
+history is never rewritten by that command. For one-off command-line choices,
+Git still supports `git restore --ours -- path/to/file` and
+`git restore --theirs -- path/to/file` before staging the result.
 
 Inspect the fork's intentional deviation from upstream with:
 
@@ -51,17 +80,45 @@ git log --oneline upstream/main..main
 Always review first:
 
 ```bash
-./end4 check
-./end4 apply --dry-run
-./end4 apply --device DarkArch --dry-run
+system update --dry-run --general
+system update --dry-run --device DarkArch
 ```
 
-Then apply the committed state interactively:
+`system update` asks for a device target interactively every time. `General
+only` applies the common fork configuration; selecting a device applies that
+device's additive overlay afterward. Use `--general` or `--device NAME` for
+scripts and non-interactive use.
+
+The default deployment is non-destructive: upstream-managed directories are
+updated without deleting live files that are not present in Git. Personal and
+device overlays are always additive. If an upstream deletion should also
+remove the corresponding live file, explicitly request:
 
 ```bash
-./end4 apply --device DarkArch
+system update --prune --device DarkArch
 ```
 
-`./end4 bootstrap` is reserved for the upstream dependency/full installer.
-Normal updates use Git plus `./end4 apply`; they do not use the old `.new`
-file workflow.
+`--prune` is shown in the confirmation prompt and only affects upstream-owned
+directories. It is not enabled by default.
+
+`system update` does not merge upstream and does not run `setup install`.
+First use `system merge`, review/resolve/commit it, then use `system update` to
+deploy the committed result. `system bootstrap` remains available for the
+upstream dependency/full installer when that is intentionally needed.
+
+For compatibility, `./end4 apply` remains available with `--dry-run`,
+`--device`, `--force`, and `--prune`; the `system` interface is the preferred
+entry point.
+
+## Seeing deviations from upstream
+
+```bash
+system status
+git diff --stat upstream/main...main
+git diff upstream/main...main -- dots/.config
+git log --oneline upstream/main..main
+```
+
+The `dots/` tree contains the fork's committed upstream-relative edits.
+`local/` contains additive personal files and LazyGit/system wrappers, while
+`devices/` contains only hardware-specific overlays.

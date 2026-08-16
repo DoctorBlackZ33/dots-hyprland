@@ -19,11 +19,16 @@ devices/
 
 ```bash
 # Preview general + device overrides
-./end4 apply --device mydesktop --dry-run
+system update --device mydesktop --dry-run
 
 # Deploy general + device overrides
-./end4 apply --device mydesktop
+system update --device mydesktop
 ```
+
+Interactive `system update` presents `General only` and every discovered
+device directory as a menu. The explicit `--device` form is useful for
+scripts; `--general` selects the common configuration without a device
+overlay.
 
 ## What to put here
 

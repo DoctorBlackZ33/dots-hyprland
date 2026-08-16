@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="${END4_REPO_ROOT:-/home/black/end4_custom}"
+exec "$repo_root/end4" system update "$@"
