@@ -3,8 +3,8 @@ set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 user_home="${HOME:?HOME is required}"
-config_root="${XDG_CONFIG_HOME:-\$user_home/.config}"
-data_root="${XDG_DATA_HOME:-\$user_home/.local/share}"
+config_root="${XDG_CONFIG_HOME:-$user_home/.config}"
+data_root="${XDG_DATA_HOME:-$user_home/.local/share}"
 upstream_ref="upstream/main"
 
 usage() {
