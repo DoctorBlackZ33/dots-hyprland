@@ -88,7 +88,9 @@ update_upstream() {
     git_at_repo fetch --prune upstream
     require_upstream_ref
 
-    if git_at_repo diff --quiet HEAD "$upstream_ref"; then
+    local incoming_count
+    incoming_count="$(git_at_repo rev-list --count "HEAD..$upstream_ref")"
+    if [[ "$incoming_count" -eq 0 ]]; then
         printf 'Already synchronized with upstream/main. No merge required.\n'
         return 0
     fi
@@ -115,7 +117,7 @@ preview_dir() {
     local source_dir="$2"
     local target_dir="$3"
     shift 3
-    local rsync_args=(-ani --human-readable)
+    local rsync_args=(-ani --checksum --human-readable)
     [[ "$mode" == delete ]] && rsync_args+=(--delete)
     printf '\n%s -> %s\n' "$source_dir" "$target_dir"
     rsync "${rsync_args[@]}" "$@" "$source_dir/" "$target_dir/" || true
