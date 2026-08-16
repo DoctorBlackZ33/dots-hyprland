@@ -1,0 +1,421 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+user_home="${HOME:?HOME is required}"
+config_root="${XDG_CONFIG_HOME:-\$user_home/.config}"
+data_root="${XDG_DATA_HOME:-\$user_home/.local/share}"
+upstream_ref="upstream/main"
+
+usage() {
+    cat <<'EOF'
+Usage: ./end4 <command> [options]
+
+Git workflow:
+  status                         Show custom-vs-upstream Git state
+  update                         Fetch upstream and start a reviewed merge
+  check                          Validate scripts and configuration syntax
+
+Deployment:
+  apply [--device NAME]          Preview, confirm, and deploy committed config
+  apply --dry-run [--device NAME]
+  apply --force [--device NAME]  Deploy without the confirmation prompt
+  bootstrap [setup options...]   Run the upstream dependency/full installer
+EOF
+}
+
+die() {
+    printf 'end4: %s\n' "$*" >&2
+    exit 1
+}
+
+git_at_repo() {
+    git -C "$repo_root" "$@"
+}
+
+require_repo() {
+    git_at_repo rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not a Git worktree: $repo_root"
+}
+
+require_clean_worktree() {
+    local status_output
+    status_output="$(git_at_repo status --porcelain)"
+    if [[ -n "$status_output" ]]; then
+        printf '%s\n' "$status_output"
+        die "working tree is not clean; commit or intentionally discard these changes first"
+    fi
+}
+
+require_no_merge() {
+    if git_at_repo rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+        die "a merge is already in progress; resolve it or run git merge --abort"
+    fi
+}
+
+require_upstream_ref() {
+    git_at_repo show-ref --verify --quiet "refs/remotes/$upstream_ref" || \
+        die "missing $upstream_ref; run git fetch upstream"
+}
+
+print_git_status() {
+    printf '%s\n' "Repository: $repo_root"
+    printf 'Branch:     %s\n' "$(git_at_repo branch --show-current)"
+    printf 'HEAD:       %s\n' "$(git_at_repo log -1 --format='%h %s')"
+    printf 'Upstream:   %s\n' "$(git_at_repo log -1 --format='%h %s' "$upstream_ref" 2>/dev/null || printf 'unavailable')"
+    printf '\nWorking tree:\n'
+    git_at_repo status --short --branch
+
+    if git_at_repo show-ref --verify --quiet "refs/remotes/$upstream_ref"; then
+        printf '\nCustom commits not in upstream:\n'
+        git_at_repo log --oneline "$upstream_ref..HEAD" || true
+        printf '\nFiles changed by this fork relative to upstream:\n'
+        git_at_repo diff --stat "$upstream_ref...HEAD" || true
+        printf '\nIncoming commits currently known locally:\n'
+        git_at_repo log --oneline "HEAD..$upstream_ref" || true
+    else
+        printf '\nNo local upstream tracking ref. Run: git fetch upstream\n'
+    fi
+
+    printf '\nLive deployment differences are available with:\n'
+    printf '  ./end4 apply --dry-run\n'
+}
+
+update_upstream() {
+    require_clean_worktree
+    require_no_merge
+
+    printf 'Fetching upstream...\n'
+    git_at_repo fetch --prune upstream
+    require_upstream_ref
+
+    if git_at_repo diff --quiet HEAD "$upstream_ref"; then
+        printf 'Already synchronized with upstream/main. No merge required.\n'
+        return 0
+    fi
+
+    printf '\nIncoming commits:\n'
+    git_at_repo log --oneline "HEAD..$upstream_ref"
+    printf '\nIncoming file changes:\n'
+    git_at_repo diff --stat HEAD "$upstream_ref"
+    printf '\nStarting a non-committing merge. Review it before committing.\n'
+
+    if git_at_repo merge --no-ff --no-commit "$upstream_ref"; then
+        printf '\nMerge prepared but not committed. Review with:\n'
+        printf '  git diff --cached\n  ./end4 check\n'
+        printf '\nFinish with:\n  git commit -m "Merge upstream/main into custom main"\n'
+    else
+        printf '\nMerge stopped with conflicts. Resolve, git add the files, then run ./end4 check and git commit.\n'
+        printf 'Abort with:\n  git merge --abort\n'
+        return 1
+    fi
+}
+
+preview_dir() {
+    local mode="$1"
+    local source_dir="$2"
+    local target_dir="$3"
+    shift 3
+    local rsync_args=(-ani --human-readable)
+    [[ "$mode" == delete ]] && rsync_args+=(--delete)
+    printf '\n%s -> %s\n' "$source_dir" "$target_dir"
+    rsync "${rsync_args[@]}" "$@" "$source_dir/" "$target_dir/" || true
+}
+
+preview_file() {
+    local source_file="$1"
+    local target_file="$2"
+    if [[ ! -e "$target_file" ]]; then
+        printf '\ncreate %s\n' "$target_file"
+    elif ! cmp -s "$source_file" "$target_file"; then
+        printf '\nupdate %s\n' "$target_file"
+        diff -u "$target_file" "$source_file" || true
+    fi
+}
+
+sync_dir() {
+    local mode="$1"
+    local source_dir="$2"
+    local target_dir="$3"
+    shift 3
+    mkdir -p "$target_dir"
+    local rsync_args=(-a)
+    [[ "$mode" == delete ]] && rsync_args+=(--delete)
+    rsync "${rsync_args[@]}" "$@" "$source_dir/" "$target_dir/"
+}
+
+sync_file() {
+    local source_file="$1"
+    local target_file="$2"
+    mkdir -p "$(dirname "$target_file")"
+    cp -p "$source_file" "$target_file"
+}
+
+for_each_upstream_misc() {
+    local source_entry source_name
+    shopt -s nullglob
+    for source_entry in "$repo_root/dots/.config"/*; do
+        source_name="$(basename "$source_entry")"
+        case "$source_name" in
+            quickshell|fish|hypr|fontconfig) continue ;;
+        esac
+        "$1" "$source_entry" "$config_root/$source_name"
+    done
+    shopt -u nullglob
+}
+
+preview_entry() {
+    local source_entry="$1"
+    local target_entry="$2"
+    if [[ -d "$source_entry" ]]; then
+        preview_dir delete "$source_entry" "$target_entry"
+    else
+        preview_file "$source_entry" "$target_entry"
+    fi
+}
+
+sync_entry() {
+    local source_entry="$1"
+    local target_entry="$2"
+    if [[ -d "$source_entry" ]]; then
+        sync_dir delete "$source_entry" "$target_entry"
+    else
+        sync_file "$source_entry" "$target_entry"
+    fi
+}
+
+preview_upstream_files() {
+    for_each_upstream_misc preview_entry
+    preview_dir delete "$repo_root/dots/.config/quickshell" "$config_root/quickshell"
+    preview_dir delete "$repo_root/dots/.config/fish" "$config_root/fish" --exclude=conf.d
+    preview_dir delete "$repo_root/dots/.config/fontconfig" "$config_root/fontconfig"
+    preview_dir delete "$repo_root/dots/.config/hypr/hyprland" "$config_root/hypr/hyprland"
+    preview_dir delete "$repo_root/dots/.config/hypr/custom" "$config_root/hypr/custom"
+    preview_dir delete "$repo_root/dots/.config/kitty" "$config_root/kitty"
+    preview_file "$repo_root/dots/.config/hypr/hyprland.lua" "$config_root/hypr/hyprland.lua"
+    preview_file "$repo_root/dots/.config/hypr/hyprlock.conf" "$config_root/hypr/hyprlock.conf"
+    preview_file "$repo_root/dots/.config/hypr/hypridle.conf" "$config_root/hypr/hypridle.conf"
+    if [[ -d "$repo_root/dots/.local/share/konsole" ]]; then
+        preview_dir keep "$repo_root/dots/.local/share/konsole" "$data_root/konsole"
+    fi
+    if [[ -f "$repo_root/dots/.local/share/icons/illogical-impulse.svg" ]]; then
+        preview_file "$repo_root/dots/.local/share/icons/illogical-impulse.svg" "$data_root/icons/illogical-impulse.svg"
+    fi
+}
+
+preview_local_overlay() {
+    if [[ -d "$repo_root/local/.config" ]]; then
+        preview_dir keep "$repo_root/local/.config" "$config_root"
+    fi
+    if [[ -d "$repo_root/local/.local" ]]; then
+        preview_dir keep "$repo_root/local/.local" "$user_home/.local"
+    fi
+}
+
+preview_device_overlay() {
+    local device_name="$1"
+    [[ -n "$device_name" ]] || return 0
+    local device_config="$repo_root/devices/$device_name/.config"
+    [[ -d "$device_config" ]] || die "device overlay not found: devices/$device_name/.config"
+    preview_dir keep "$device_config" "$config_root"
+}
+
+preview_deployment() {
+    preview_upstream_files
+    preview_local_overlay
+    preview_device_overlay "$device_name"
+}
+
+sync_upstream_files() {
+    for_each_upstream_misc sync_entry
+    sync_dir delete "$repo_root/dots/.config/quickshell" "$config_root/quickshell"
+    sync_dir delete "$repo_root/dots/.config/fish" "$config_root/fish" --exclude=conf.d
+    sync_dir delete "$repo_root/dots/.config/fontconfig" "$config_root/fontconfig"
+    sync_dir delete "$repo_root/dots/.config/hypr/hyprland" "$config_root/hypr/hyprland"
+    sync_dir delete "$repo_root/dots/.config/hypr/custom" "$config_root/hypr/custom"
+    sync_dir delete "$repo_root/dots/.config/kitty" "$config_root/kitty"
+    sync_file "$repo_root/dots/.config/hypr/hyprland.lua" "$config_root/hypr/hyprland.lua"
+    sync_file "$repo_root/dots/.config/hypr/hyprlock.conf" "$config_root/hypr/hyprlock.conf"
+    sync_file "$repo_root/dots/.config/hypr/hypridle.conf" "$config_root/hypr/hypridle.conf"
+    if [[ -d "$repo_root/dots/.local/share/konsole" ]]; then
+        sync_dir keep "$repo_root/dots/.local/share/konsole" "$data_root/konsole"
+    fi
+    if [[ -f "$repo_root/dots/.local/share/icons/illogical-impulse.svg" ]]; then
+        sync_file "$repo_root/dots/.local/share/icons/illogical-impulse.svg" "$data_root/icons/illogical-impulse.svg"
+    fi
+}
+
+apply_local_overlay() {
+    if [[ -d "$repo_root/local/.config" ]]; then
+        sync_dir keep "$repo_root/local/.config" "$config_root"
+    fi
+    if [[ -d "$repo_root/local/.local" ]]; then
+        sync_dir keep "$repo_root/local/.local" "$user_home/.local"
+    fi
+}
+
+apply_device_overlay() {
+    local device_name="$1"
+    [[ -n "$device_name" ]] || return 0
+    local device_config="$repo_root/devices/$device_name/.config"
+    [[ -d "$device_config" ]] || die "device overlay not found: devices/$device_name/.config"
+    sync_dir keep "$device_config" "$config_root"
+}
+
+run_deployment() {
+    sync_upstream_files
+    apply_local_overlay
+    apply_device_overlay "$device_name"
+
+    if command -v systemctl >/dev/null 2>&1 && [[ -f "$config_root/systemd/user/hypr-ocr-daemon.service" ]]; then
+        systemctl --user daemon-reload || printf 'end4: warning: systemd daemon-reload failed\n' >&2
+        systemctl --user enable hypr-ocr-daemon.service >/dev/null 2>&1 || printf 'end4: warning: could not enable OCR service\n' >&2
+    fi
+    if command -v hyprctl >/dev/null 2>&1; then
+        hyprctl reload >/dev/null || printf 'end4: warning: hyprctl reload failed\n' >&2
+    fi
+}
+
+run_shell_checks() {
+    local check_failed=0
+    local check_file
+    while IFS= read -r -d '' check_file; do
+        if ! bash -n "$check_file"; then check_failed=1; fi
+    done < <(find "$repo_root/dots/.config/hypr/custom" "$repo_root/dots/.config/quickshell/ii/scripts" "$repo_root/local" "$repo_root/devices" -type f -name '*.sh' -print0 2>/dev/null)
+    bash -n "$repo_root/end4" || check_failed=1
+    return "$check_failed"
+}
+
+run_lua_checks() {
+    command -v luac >/dev/null 2>&1 || return 0
+    local check_failed=0
+    local check_file
+    while IFS= read -r -d '' check_file; do
+        if ! luac -p "$check_file"; then check_failed=1; fi
+    done < <(find "$repo_root/dots/.config/hypr" "$repo_root/local/.config/nvim" -type f -name '*.lua' -print0 2>/dev/null)
+    return "$check_failed"
+}
+
+run_python_checks() {
+    local check_failed=0
+    local check_file
+    while IFS= read -r -d '' check_file; do
+        if ! python3 -c 'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"), filename=sys.argv[1])' "$check_file"; then
+            check_failed=1
+        fi
+    done < <(find "$repo_root/dots/.config/hypr/custom" "$repo_root/dots/.config/quickshell/ii/scripts" "$repo_root/local" "$repo_root/devices" "$repo_root/tools" -type f -name '*.py' -print0 2>/dev/null)
+    return "$check_failed"
+}
+
+run_qml_checks() {
+    command -v qmllint >/dev/null 2>&1 || return 0
+    local check_failed=0
+    local check_file check_code
+    local qml_files=(
+        "$repo_root/dots/.config/quickshell/ii/modules/common/utils/ScreenshotAction.qml"
+        "$repo_root/dots/.config/quickshell/ii/modules/ii/mediaControls/MediaControls.qml"
+        "$repo_root/dots/.config/quickshell/ii/modules/settings/InterfaceConfig.qml"
+        "$repo_root/dots/.config/quickshell/ii/modules/waffle/looks/Looks.qml"
+    )
+    while IFS= read -r -d '' check_file; do qml_files+=("$check_file"); done < <(
+        find "$repo_root/devices" -type f -name '*.qml' -print0 2>/dev/null
+    )
+    for check_file in "${qml_files[@]}"; do
+        [[ -f "$check_file" ]] || continue
+        if qmllint -s "$check_file"; then
+            continue
+        else
+            check_code=$?
+        fi
+        if [[ "$check_code" -eq 255 ]]; then
+            printf 'end4: warning: qmllint could not load the project context for %s\n' "$check_file" >&2
+        else
+            check_failed=1
+        fi
+    done
+    return "$check_failed"
+}
+
+run_checks() {
+    local check_failed=0
+    git_at_repo diff --check || check_failed=1
+    git_at_repo diff --cached --check || check_failed=1
+    run_shell_checks || check_failed=1
+    run_lua_checks || check_failed=1
+    run_python_checks || check_failed=1
+    run_qml_checks || check_failed=1
+    if [[ "$check_failed" -ne 0 ]]; then
+        printf 'end4: one or more checks failed\n' >&2
+        return 1
+    fi
+    printf 'end4: checks passed\n'
+}
+
+apply_configs() {
+    require_clean_worktree
+    require_no_merge
+    run_checks
+
+    preview_deployment
+    if [[ "$dry_run" == true ]]; then
+        return 0
+    fi
+
+    if [[ "$force_apply" != true ]]; then
+        if [[ ! -t 0 ]]; then
+            die 'deployment requires a terminal confirmation; use --force for automation'
+        fi
+        read -r -p $'\nApply these committed files to the live configuration? [y/N] ' response
+        [[ "$response" =~ ^[Yy]$ ]] || { printf 'Deployment cancelled.\n'; return 0; }
+    fi
+
+    run_deployment
+    printf 'end4: deployment complete\n'
+}
+
+device_name=''
+dry_run=false
+force_apply=false
+command_name="${1:-status}"
+shift || true
+
+case "$command_name" in
+    status|report)
+        require_repo
+        print_git_status
+        ;;
+    update)
+        require_repo
+        update_upstream
+        ;;
+    check)
+        require_repo
+        run_checks
+        ;;
+    bootstrap)
+        require_repo
+        (cd "$repo_root" && exec ./setup install "$@")
+        ;;
+    apply)
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --device)
+                    [[ $# -ge 2 ]] || die '--device requires a name'
+                    device_name="$2"
+                    shift 2
+                    ;;
+                --dry-run) dry_run=true; shift ;;
+                --force) force_apply=true; shift ;;
+                -h|--help) usage; exit 0 ;;
+                *) die "unknown apply option: $1" ;;
+            esac
+        done
+        require_repo
+        apply_configs
+        ;;
+    help|-h|--help)
+        usage
+        ;;
+    *)
+        die "unknown command: $command_name"
+        ;;
+esac
