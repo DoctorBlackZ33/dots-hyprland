@@ -256,13 +256,37 @@ ContentPage {
 
         ConfigSpinBox {
             icon: "av_timer"
-            text: Translation.tr("Timeout duration (if not defined by notification) (ms)")
+            text: Translation.tr("Popup timeout (ms)")
             value: Config.options.notifications.timeout
             from: 1000
             to: 60000
             stepSize: 1000
             onValueChanged: {
                 Config.options.notifications.timeout = value;
+            }
+        }
+
+        ConfigSpinBox {
+            icon: "storage"
+            text: Translation.tr("Max notifications in history")
+            value: Config.options.notifications.maxHistory
+            from: 10
+            to: 500
+            stepSize: 10
+            onValueChanged: {
+                Config.options.notifications.maxHistory = value;
+            }
+        }
+
+        ConfigSpinBox {
+            icon: "delete_sweep"
+            text: Translation.tr("Auto-delete notifications older than (hours)")
+            value: Config.options.notifications.maxAgeHours
+            from: 1
+            to: 168
+            stepSize: 1
+            onValueChanged: {
+                Config.options.notifications.maxAgeHours = value;
             }
         }
 
@@ -924,6 +948,93 @@ ContentPage {
                 wrapMode: TextEdit.NoWrap
                 onTextChanged: {
                     Config.options.appearance.fonts.expressive = text;
+                }
+            }
+        }
+    }
+
+    ContentSection {
+        icon: "transparency"
+        title: Translation.tr("Transparency")
+
+        ContentSubsection {
+            title: Translation.tr("Enable Transparency")
+            tooltip: Translation.tr("Master toggle for all transparency effects")
+
+            ConfigSwitch {
+                buttonIcon: "blur_on"
+                text: Translation.tr("Enable transparency effects")
+                checked: Config.options.appearance.transparency.enable
+                onCheckedChanged: {
+                    Config.options.appearance.transparency.enable = checked;
+                }
+            }
+        }
+
+        ContentSubsection {
+            title: Translation.tr("Background transparency (layers)")
+            tooltip: Translation.tr("How transparent the background layers are (0 = opaque, 1 = fully transparent)")
+
+            ConfigSpinBox {
+                icon: "layers"
+                text: Translation.tr("Background transparency (%)")
+                value: Math.round(Config.options.appearance.transparency.backgroundTransparency * 100)
+                from: 0
+                to: 100
+                stepSize: 1
+                onValueChanged: {
+                    Config.options.appearance.transparency.backgroundTransparency = value / 100;
+                }
+            }
+        }
+
+        ContentSubsection {
+            title: Translation.tr("Panel background transparency")
+            tooltip: Translation.tr("How transparent the panel backgrounds are (0 = opaque, 1 = fully transparent)")
+
+            ConfigSpinBox {
+                icon: "view_carousel"
+                text: Translation.tr("Panel transparency (%)")
+                value: Math.round(Config.options.appearance.transparency.panelBackgroundTransparency * 100)
+                from: 0
+                to: 100
+                stepSize: 1
+                onValueChanged: {
+                    Config.options.appearance.transparency.panelBackgroundTransparency = value / 100;
+                }
+            }
+        }
+
+        ContentSubsection {
+            title: Translation.tr("Panel layer transparency")
+            tooltip: Translation.tr("How transparent panel layers are (0 = opaque, 1 = fully transparent). Higher values = more see-through layers")
+
+            ConfigSpinBox {
+                icon: "stack"
+                text: Translation.tr("Panel layer transparency (%)")
+                value: Math.round(Config.options.appearance.transparency.panelLayerTransparency * 100)
+                from: 0
+                to: 100
+                stepSize: 1
+                onValueChanged: {
+                    Config.options.appearance.transparency.panelLayerTransparency = value / 100;
+                }
+            }
+        }
+
+        ContentSubsection {
+            title: Translation.tr("Content transparency")
+            tooltip: Translation.tr("How transparent content areas are (0 = opaque, 1 = fully transparent)")
+
+            ConfigSpinBox {
+                icon: "dashboard"
+                text: Translation.tr("Content transparency (%)")
+                value: Math.round(Config.options.appearance.transparency.contentTransparency * 100)
+                from: 0
+                to: 100
+                stepSize: 1
+                onValueChanged: {
+                    Config.options.appearance.transparency.contentTransparency = value / 100;
                 }
             }
         }

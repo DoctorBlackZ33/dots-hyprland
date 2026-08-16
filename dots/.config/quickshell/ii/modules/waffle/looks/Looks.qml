@@ -18,10 +18,11 @@ Singleton {
     property bool dark: Appearance.m3colors.darkmode
 
     readonly property bool transparencyEnabled: Config.options.appearance.transparency.enable
-    property real backgroundTransparency: transparencyEnabled ? 0.16 : 0
-    property real panelBackgroundTransparency: transparencyEnabled ? 0.14 : 0
-    property real panelLayerTransparency: root.dark ? 0.9 : 0.7
-    property real contentTransparency: root.dark ? 0.87 : 0.5
+    // Same readonly pattern as enable — QML tracks these as reactive computed bindings
+    readonly property real backgroundTransparency: transparencyEnabled ? Config.options.appearance.transparency.backgroundTransparency : 0
+    readonly property real panelBackgroundTransparency: transparencyEnabled ? Config.options.appearance.transparency.panelBackgroundTransparency : 0
+    readonly property real panelLayerTransparency: transparencyEnabled ? Config.options.appearance.transparency.panelLayerTransparency : (root.dark ? 0.9 : 0.7)
+    readonly property real contentTransparency: transparencyEnabled ? Config.options.appearance.transparency.contentTransparency : (root.dark ? 0.87 : 0.5)
     function applyBackgroundTransparency(col) {
         return ColorUtils.applyAlpha(col, 1 - root.backgroundTransparency)
     }

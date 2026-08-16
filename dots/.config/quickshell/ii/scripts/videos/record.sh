@@ -57,6 +57,7 @@ else
         else
             wf-recorder -o "$(getactivemonitor)" --pixel-format yuv420p -f './recording_'"$(getdate)"'.mp4' -t
         fi
+        notify-send "Recording saved" 'recording_'"$(getdate)"'.mp4' -a 'Recorder' & disown
     else
         # If a manual region was provided via --region, use it; otherwise run slurp as before.
         if [[ -n "$MANUAL_REGION" ]]; then
@@ -74,5 +75,6 @@ else
         else
             wf-recorder --pixel-format yuv420p -f './recording_'"$(getdate)"'.mp4' -t --geometry "$region"
         fi
+        notify-send "Recording saved" 'recording_'"$(getdate)"'.mp4' -a 'Recorder' & disown
     fi
 fi

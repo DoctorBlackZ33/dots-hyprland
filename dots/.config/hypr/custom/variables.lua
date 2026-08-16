@@ -1,1 +1,2 @@
-
+-- For all available variables, see ~/.config/hypr/hyprland/variables.lua
+-- Add custom variables here (e.g., hl.env("VAR_NAME", "value") or shell variable assignments)

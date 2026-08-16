@@ -1,0 +1,13 @@
+create a way to get wallpapaer information for themes to display a wallapaper on the lockscreen
+swww query returns the path tot the wallpaper
+	else
+		# agsv1 run-js "wallpaper.set('')"
+		# sleep 0.1 && agsv1 run-js "wallpaper.set('${imgpath}')" &
+		swww img "$imgpath" --transition-step 100 --transition-fps 120 \
+			--transition-type grow --transition-angle 30 --transition-duration 1 \
+			--transition-pos "$cursorposx, $cursorposy_inverted"
+
+		"$CONFIG_DIR"/scripts/color_generation/colorgen.sh "$imgpath" --apply --smart
+		remove_restore
+
+this changes the wallpaper in switch() in home/.config/ags/scripts/color_generation/switchwall.sh

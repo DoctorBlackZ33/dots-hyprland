@@ -1,1 +1,3 @@
-
+-- Custom environment variables
+-- https://wiki.hypr.land/Configuring/Environment-variables/
+-- Add environment variables here using hl.env("NAME", "value")

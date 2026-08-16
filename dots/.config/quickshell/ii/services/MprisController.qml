@@ -18,10 +18,12 @@ Singleton {
 	id: root;
 	property list<MprisPlayer> players: Mpris.players.values.filter(player => isRealPlayer(player));
 	property MprisPlayer trackedPlayer: null;
-	property MprisPlayer activePlayer: trackedPlayer ?? Mpris.players.values[0] ?? null;
+	property MprisPlayer activePlayer: trackedPlayer ?? players[0] ?? null;
 	signal trackChanged(reverse: bool);
 
 	property bool __reverse: false;
+	property var __activity: ({});
+	property int __activitySerial: 0;
 
 	property var activeTrack;
 
@@ -41,6 +43,61 @@ Singleton {
             !(player.dbusName?.endsWith('.mpd') && !player.dbusName.endsWith('MediaPlayer2.mpd')));
     }
 
+	function isKdeConnectPlayer(player) {
+		return player?.dbusName?.startsWith("org.mpris.MediaPlayer2.kdeconnect.") ?? false;
+	}
+
+	function playerKey(player) {
+		return player?.dbusName ?? player?.uniqueId ?? "";
+	}
+
+	function playerActivity(player) {
+		const key = playerKey(player);
+		return key === "" ? 0 : (__activity[key] ?? 0);
+	}
+
+	function noteActivity(player) {
+		const key = playerKey(player);
+		if (key === "") return;
+
+		const activity = Object.assign({}, __activity);
+		activity[key] = ++__activitySerial;
+		__activity = activity;
+	}
+
+	function mostRecentlyActive(players) {
+		let selected = null;
+		for (const player of players) {
+			if (selected === null || playerActivity(player) > playerActivity(selected)) {
+				selected = player;
+			}
+		}
+		return selected;
+	}
+
+	function preferredPlayer() {
+		const localPlaying = players.filter(player => player.isPlaying && !isKdeConnectPlayer(player));
+		const remotePlaying = players.filter(player => player.isPlaying && isKdeConnectPlayer(player));
+
+		// A player on this machine always wins over KDE Connect players.
+		return mostRecentlyActive(localPlaying) ??
+			mostRecentlyActive(remotePlaying) ??
+			(trackedPlayer && players.indexOf(trackedPlayer) !== -1 ? trackedPlayer : players[0] ?? null);
+	}
+
+	function refreshActivePlayer() {
+		const nextPlayer = preferredPlayer();
+		if (nextPlayer === trackedPlayer) return;
+
+		if (nextPlayer && trackedPlayer) {
+			__reverse = players.indexOf(nextPlayer) < players.indexOf(trackedPlayer);
+		} else {
+			__reverse = false;
+		}
+
+		trackedPlayer = nextPlayer;
+	}
+
 	// Original stuff from fox below
 	Instantiator {
 		model: Mpris.players;
@@ -50,28 +107,23 @@ Singleton {
 			target: modelData;
 
 			Component.onCompleted: {
-				if (root.trackedPlayer == null || modelData.isPlaying) {
-					root.trackedPlayer = modelData;
-				}
+				if (modelData.isPlaying) root.noteActivity(modelData);
+				root.refreshActivePlayer();
 			}
 
 			Component.onDestruction: {
-				if (root.trackedPlayer == null || !root.trackedPlayer.isPlaying) {
-					for (const player of Mpris.players.values) {
-						if (player.playbackState.isPlaying) {
-							root.trackedPlayer = player;
-							break;
-						}
-					}
-
-					if (trackedPlayer == null && Mpris.players.values.length != 0) {
-						trackedPlayer = Mpris.players.values[0];
-					}
-				}
+				if (root.trackedPlayer === modelData) root.trackedPlayer = null;
+				root.refreshActivePlayer();
 			}
 
 			function onPlaybackStateChanged() {
-				if (root.trackedPlayer !== modelData) root.trackedPlayer = modelData;
+				if (modelData.isPlaying) root.noteActivity(modelData);
+				root.refreshActivePlayer();
+			}
+
+			function onPostTrackChanged() {
+				if (modelData.isPlaying) root.noteActivity(modelData);
+				root.refreshActivePlayer();
 			}
 		}
 	}
@@ -154,16 +206,17 @@ Singleton {
 	}
 
 	function setActivePlayer(player: MprisPlayer) {
-		const targetPlayer = player ?? Mpris.players[0];
+		const targetPlayer = player && players.indexOf(player) !== -1 ? player : preferredPlayer();
 		console.log(`[Mpris] Active player ${targetPlayer} << ${activePlayer}`)
 
 		if (targetPlayer && this.activePlayer) {
-			this.__reverse = Mpris.players.indexOf(targetPlayer) < Mpris.players.indexOf(this.activePlayer);
+			this.__reverse = players.indexOf(targetPlayer) < players.indexOf(this.activePlayer);
 		} else {
 			// always animate forward if going to null
 			this.__reverse = false;
 		}
 
+		if (targetPlayer?.isPlaying) noteActivity(targetPlayer);
 		this.trackedPlayer = targetPlayer;
 	}
 
@@ -171,7 +224,7 @@ Singleton {
 		target: "mpris"
 
 		function pauseAll(): void {
-			for (const player of Mpris.players.values) {
+			for (const player of root.players) {
 				if (player.canPause) player.pause();
 			}
 		}
