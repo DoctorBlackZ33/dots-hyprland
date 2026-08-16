@@ -1,0 +1,12 @@
+[Unit]
+Description=EasyOCR daemon for Hyprland OCR (en/fr/de)
+Documentation=file:///home/black/.config/quickshell/ii/scripts/ocr/ocr-daemon.py
+
+[Service]
+Type=simple
+ExecStart=%h/.local/state/quickshell/ocr-venv/bin/python3 %h/.config/quickshell/ii/scripts/ocr/ocr-daemon.py --socket %t/hypr-ocr.sock
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

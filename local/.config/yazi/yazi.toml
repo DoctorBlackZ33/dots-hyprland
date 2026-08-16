@@ -1,0 +1,48 @@
+# Yazi configuration
+
+[manager]
+ratio = [1, 2, 3]
+show_hidden = true
+show_symlink = true
+
+[preview]
+tab_size = 2
+max_width = 600
+max_height = 900
+cache_dir = ""
+
+[open]
+rules = [
+    # Edit text and config files with nvim
+    { mime = "text/*", use = "edit" },
+    { mime = "inode/x-empty", use = "edit" },
+    # Open images with nvim for preview
+    { mime = "image/*", use = ["open", "edit"] },
+    # Open media with mpv (play opener)
+    { mime = "video/*", use = "play" },
+    { mime = "audio/*", use = "play" },
+    # Edit code/config files
+    { mime = "application/x-yaml", use = "edit" },
+    { mime = "application/json", use = "edit" },
+    { mime = "application/toml", use = "edit" },
+    { mime = "application/xml", use = "edit" },
+    # Open archives with edit (for inspection)
+    { mime = "application/zip", use = "edit" },
+    { mime = "application/gzip", use = "edit" },
+    { mime = "application/x-tar", use = "edit" },
+    { mime = "application/x-bzip2", use = "edit" },
+    { mime = "application/x-xz", use = "edit" },
+    { mime = "application/x-7z-compressed", use = "edit" },
+    { mime = "application/x-rar", use = "edit" },
+    { mime = "application/pdf", use = "edit" },
+    # Default: open with system handler
+    { url = "*", use = "open" },
+]
+
+[plugin]
+prepend_previewers = [
+    { mime = "image/*", run = "image" },
+    { mime = "video/*", run = "video" },
+    { mime = "audio/*", run = "audio" },
+]
+

@@ -1,0 +1,18 @@
+return {
+  term0 = "#27160E",
+  term1 = "#F28BAB",
+  term2 = "#F9CF6A",
+  term3 = "#FFDECA",
+  term4 = "#BEA6F8",
+  term5 = "#FAC1E0",
+  term6 = "#B8D6FF",
+  term7 = "#E0D1F2",
+  term8 = "#64586D",
+  term9 = "#F28BAB",
+  term10 = "#F9CF6A",
+  term11 = "#FFDECA",
+  term12 = "#BEA6F8",
+  term13 = "#FAC1E0",
+  term14 = "#B8D6FF",
+  term15 = "#FFDBC9",
+}
