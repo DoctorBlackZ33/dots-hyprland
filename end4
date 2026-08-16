@@ -117,7 +117,7 @@ preview_dir() {
     local source_dir="$2"
     local target_dir="$3"
     shift 3
-    local rsync_args=(-ani --checksum --human-readable)
+    local rsync_args=(-ani --checksum --no-times --human-readable)
     [[ "$mode" == delete ]] && rsync_args+=(--delete)
     printf '\n%s -> %s\n' "$source_dir" "$target_dir"
     rsync "${rsync_args[@]}" "$@" "$source_dir/" "$target_dir/" || true
