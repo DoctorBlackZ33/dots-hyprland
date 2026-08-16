@@ -14,7 +14,7 @@ case "$1" in
                 exit 0
             fi
         fi
-        
+
         # Start sync in background
         PYTHONUNBUFFERED=1 "$HOME/.local/src/lumux/venv/bin/python" "$SCRIPT" start &
         pid=$!

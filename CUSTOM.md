@@ -65,4 +65,3 @@ Then apply the committed state interactively:
 `./end4 bootstrap` is reserved for the upstream dependency/full installer.
 Normal updates use Git plus `./end4 apply`; they do not use the old `.new`
 file workflow.
-

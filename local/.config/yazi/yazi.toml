@@ -45,4 +45,3 @@ prepend_previewers = [
     { mime = "video/*", run = "video" },
     { mime = "audio/*", run = "audio" },
 ]
-
