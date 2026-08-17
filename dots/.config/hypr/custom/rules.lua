@@ -1,9 +1,9 @@
 -- Custom window/layer/workspace rules
 -- Converted from hyprlang to Lua
 
--- Waydroid: allow resizing, no fixed size
-hl.window_rule({ match = { class = "^Waydroid$" }, size = false })
-hl.window_rule({ match = { class = "^Waydroid$" }, no_limit = true })
+-- Waydroid: allow resizing, no fixed size || size and no_limit dont exist, broken at the moment, see https://wiki.hypr.land/Configuring/Basics/Window-Rules/ for fix
+-- hl.window_rule({ match = { class = "^Waydroid$" }, size = false })
+-- hl.window_rule({ match = { class = "^Waydroid$" }, no_limit = true })
 
 -- Window rules
 -- Steam games: immediate rendering (tearing enabled)
