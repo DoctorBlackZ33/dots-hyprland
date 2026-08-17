@@ -35,3 +35,33 @@ customCommands:
         command: 'END4_FROM_LAZYGIT=1 /home/black/end4_custom/end4 status'
         context: 'global'
         output: terminal
+      - key: 's'
+        description: 'Show linked development session status'
+        command: 'END4_FROM_LAZYGIT=1 /home/black/end4_custom/end4 dev status'
+        context: 'global'
+        output: terminal
+      - key: 'f'
+        description: 'Refresh linked development files'
+        command: 'END4_FROM_LAZYGIT=1 /home/black/end4_custom/end4 dev refresh'
+        context: 'global'
+        output: terminal
+      - key: 'c'
+        description: 'Capture live-only files into the development branch'
+        command: 'END4_FROM_LAZYGIT=1 /home/black/end4_custom/end4 dev capture'
+        context: 'global'
+        output: terminal
+      - key: 'h'
+        description: 'Reload Hyprland and Quickshell for development'
+        command: 'END4_FROM_LAZYGIT=1 /home/black/end4_custom/end4 dev reload all'
+        context: 'global'
+        output: terminal
+      - key: 'x'
+        description: 'Stop development and restore stable live state'
+        command: 'END4_FROM_LAZYGIT=1 /home/black/end4_custom/end4 dev stop'
+        context: 'global'
+        output: terminal
+      - key: 'k'
+        description: 'Stop development and keep tested live files'
+        command: 'END4_FROM_LAZYGIT=1 /home/black/end4_custom/end4 dev stop --keep'
+        context: 'global'
+        output: terminal

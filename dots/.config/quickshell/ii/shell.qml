@@ -67,6 +67,17 @@ ShellRoot {
         }
     }
 
+    // Used by the end4 linked development workflow.  This keeps reloads
+    // scoped to the active Quickshell instance instead of killing every
+    // instance owned by the user.
+    IpcHandler {
+        target: "end4Dev"
+
+        function reload(): void {
+            Quickshell.reload(true)
+        }
+    }
+
     GlobalShortcut {
         name: "panelFamilyCycle"
         description: "Cycles panel family"
@@ -74,4 +85,3 @@ ShellRoot {
         onPressed: root.cyclePanelFamily()
     }
 }
-

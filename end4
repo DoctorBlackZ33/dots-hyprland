@@ -16,6 +16,15 @@ upstream_ref="${END4_UPSTREAM_REF:-upstream/main}"
 
 nvim_source_root="$repo_root/local/.config/nvim"
 nvim_live_root="$config_root/nvim"
+layout_file="$repo_root/tools/end4-layout.sh"
+dev_session_file="$state_root/end4/dev/session"
+
+[[ -f "$layout_file" ]] || {
+    printf 'end4: shared deployment layout is missing: %s\n' "$layout_file" >&2
+    exit 1
+}
+# shellcheck source=/dev/null
+source "$layout_file"
 
 assume_yes=false
 device_name=''
@@ -32,6 +41,7 @@ Usage: end4 <command> [options]
 
 Unified system workflow:
   system                         Open the end-4 maintenance menu
+  dev <subcommand>               Develop a branch directly against live config
   merge [--yes]                  Fetch upstream and prepare a reviewed merge
   update [options]               Preview, confirm, and deploy committed config
   discard [--yes]                Abort merge and discard uncommitted changes
@@ -46,6 +56,19 @@ Neovim maintenance:
   nvim import [--yes]            Adopt live Neovim files into the repository
   nvim sync                      Install plugins from lazy-lock.json
   nvim rollback [BACKUP]         Restore an archived Neovim configuration
+
+Development workflow:
+  dev start BRANCH [--from REF]  Create and attach a linked development worktree
+  dev attach BRANCH|PATH         Attach an existing linked development worktree
+  dev status                     Show active worktree, links, and live candidates
+  dev refresh                    Reconcile links after branch/file changes
+  dev capture                    Review unlinked live files for adoption
+  dev reload [SCOPE]             Reload known-safe running components
+  dev check                      Validate the attached worktree
+  dev sync                       Synchronize plugins for the attached worktree
+  dev stop [--keep]              Restore stable live state or keep tested files
+  dev integrate BRANCH           Prepare a reviewed feature merge into main
+  dev remove BRANCH              Remove an unused development worktree
 
 System update options:
   --device NAME                  Apply General plus a named device overlay
@@ -94,6 +117,17 @@ require_no_merge() {
     if git_at_repo rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
         die 'a merge is already in progress; resolve it or run system discard'
     fi
+}
+
+dev_session_is_active() {
+    [[ "${END4_DEV_INTERNAL:-0}" == 1 ]] && return 1
+    [[ -f "$dev_session_file" ]] || return 1
+    grep -Eq '^STATUS=(active|attaching)$' "$dev_session_file"
+}
+
+require_no_dev_session() {
+    dev_session_is_active || return 0
+    die 'a linked development session is active; use system dev commands or run system dev stop first'
 }
 
 require_upstream_ref() {
@@ -370,6 +404,7 @@ launch_lazygit_review() {
 }
 
 merge_upstream() {
+    require_no_dev_session
     require_clean_worktree
     require_no_merge
 
@@ -413,6 +448,7 @@ merge_upstream() {
 }
 
 review_upstream() {
+    require_no_dev_session
     require_clean_worktree
     require_no_merge
 
@@ -921,6 +957,7 @@ preview_nvim_deployment() {
 }
 
 nvim_import() {
+    require_no_dev_session
     local entries_file raw_entries
     require_repo
     require_no_merge
@@ -956,6 +993,7 @@ nvim_import() {
 }
 
 nvim_sync() {
+    require_no_dev_session
     local sync_root sync_status config_parent
     validate_nvim_tree "$nvim_source_root" 'repository Neovim tree' true
     command -v nvim >/dev/null 2>&1 || die 'Neovim is required for plugin synchronization'
@@ -1018,12 +1056,14 @@ nvim_rollback() {
 }
 
 nvim_check() {
+    require_no_dev_session
     validate_nvim_tree "$nvim_source_root" 'repository Neovim tree' true
     check_nvim_dependencies "$nvim_source_root" || die 'Neovim plugin dependencies are not synchronized'
     run_nvim_health "$nvim_source_root"
 }
 
 nvim_deploy() {
+    require_no_dev_session
     local nvim_status
     require_repo
     require_no_merge
@@ -1048,17 +1088,85 @@ nvim_deploy() {
     cleanup_nvim_stage
 }
 
-for_each_upstream_misc() {
-    local source_entry source_name
-    shopt -s nullglob
-    for source_entry in "$repo_root/dots/.config"/*; do
-        source_name="$(basename "$source_entry")"
-        case "$source_name" in
-            quickshell|fish|hypr|fontconfig) continue ;;
-        esac
-        "$1" "$source_entry" "$config_root/$source_name"
-    done
-    shopt -u nullglob
+layout_preview_entry() {
+    local source_entry="$1"
+    local target_entry="$2"
+    local kind="$3"
+    case "$kind" in
+        upstream-entry)
+            preview_entry "$source_entry" "$target_entry"
+            ;;
+        upstream-quickshell)
+            preview_dir "$(upstream_sync_mode)" "$source_entry" "$target_entry"
+            ;;
+        upstream-fish)
+            preview_dir "$(upstream_sync_mode)" "$source_entry" "$target_entry" --exclude=conf.d
+            ;;
+        upstream-fontconfig|upstream-hyprland|upstream-hypr-custom)
+            preview_dir "$(upstream_sync_mode)" "$source_entry" "$target_entry"
+            ;;
+        upstream-file|upstream-data-file)
+            preview_file "$source_entry" "$target_entry"
+            ;;
+        upstream-data)
+            preview_dir keep "$source_entry" "$target_entry"
+            ;;
+        local-config)
+            preview_dir keep "$source_entry" "$target_entry" --exclude=/nvim
+            ;;
+        local-nvim)
+            preview_nvim_deployment
+            ;;
+        local-data)
+            preview_dir keep "$source_entry" "$target_entry"
+            ;;
+        device-config)
+            preview_dir keep "$source_entry" "$target_entry" --exclude=/nvim
+            ;;
+        *)
+            die "unknown deployment layout kind: $kind"
+            ;;
+    esac
+}
+
+layout_sync_entry() {
+    local source_entry="$1"
+    local target_entry="$2"
+    local kind="$3"
+    case "$kind" in
+        upstream-entry)
+            sync_entry "$source_entry" "$target_entry"
+            ;;
+        upstream-quickshell|upstream-fontconfig|upstream-hyprland|upstream-hypr-custom)
+            sync_dir "$(upstream_sync_mode)" "$source_entry" "$target_entry"
+            ;;
+        upstream-fish)
+            sync_dir "$(upstream_sync_mode)" "$source_entry" "$target_entry" --exclude=conf.d
+            ;;
+        upstream-file|upstream-data-file)
+            sync_file "$source_entry" "$target_entry"
+            ;;
+        upstream-data)
+            sync_dir keep "$source_entry" "$target_entry"
+            ;;
+        local-config)
+            sync_dir keep "$source_entry" "$target_entry" --exclude=/nvim
+            ;;
+        local-nvim)
+            create_nvim_stage
+            replace_nvim_tree "$nvim_stage_dir"
+            cleanup_nvim_stage
+            ;;
+        local-data)
+            sync_dir keep "$source_entry" "$target_entry"
+            ;;
+        device-config)
+            sync_dir keep "$source_entry" "$target_entry" --exclude=/nvim
+            ;;
+        *)
+            die "unknown deployment layout kind: $kind"
+            ;;
+    esac
 }
 
 preview_entry() {
@@ -1082,40 +1190,15 @@ sync_entry() {
 }
 
 preview_upstream_files() {
-    for_each_upstream_misc preview_entry
-    preview_dir "$(upstream_sync_mode)" "$repo_root/dots/.config/quickshell" "$config_root/quickshell"
-    preview_dir "$(upstream_sync_mode)" "$repo_root/dots/.config/fish" "$config_root/fish" --exclude=conf.d
-    preview_dir "$(upstream_sync_mode)" "$repo_root/dots/.config/fontconfig" "$config_root/fontconfig"
-    preview_dir "$(upstream_sync_mode)" "$repo_root/dots/.config/hypr/hyprland" "$config_root/hypr/hyprland"
-    preview_dir "$(upstream_sync_mode)" "$repo_root/dots/.config/hypr/custom" "$config_root/hypr/custom"
-    preview_dir "$(upstream_sync_mode)" "$repo_root/dots/.config/kitty" "$config_root/kitty"
-    preview_file "$repo_root/dots/.config/hypr/hyprland.lua" "$config_root/hypr/hyprland.lua"
-    preview_file "$repo_root/dots/.config/hypr/hyprlock.conf" "$config_root/hypr/hyprlock.conf"
-    preview_file "$repo_root/dots/.config/hypr/hypridle.conf" "$config_root/hypr/hypridle.conf"
-    if [[ -d "$repo_root/dots/.local/share/konsole" ]]; then
-        preview_dir keep "$repo_root/dots/.local/share/konsole" "$data_root/konsole"
-    fi
-    if [[ -f "$repo_root/dots/.local/share/icons/illogical-impulse.svg" ]]; then
-        preview_file "$repo_root/dots/.local/share/icons/illogical-impulse.svg" "$data_root/icons/illogical-impulse.svg"
-    fi
+    end4_layout_for_each_group upstream layout_preview_entry
 }
 
 preview_local_overlay() {
-    if [[ -d "$repo_root/local/.config" ]]; then
-        preview_dir keep "$repo_root/local/.config" "$config_root" --exclude=/nvim
-        preview_nvim_deployment
-    fi
-    if [[ -d "$repo_root/local/.local" ]]; then
-        preview_dir keep "$repo_root/local/.local" "$user_home/.local"
-    fi
+    end4_layout_for_each_group local layout_preview_entry
 }
 
 preview_device_overlay() {
-    local selected_device="$1"
-    [[ -n "$selected_device" ]] || return 0
-    local device_config="$repo_root/devices/$selected_device/.config"
-    [[ -d "$device_config" ]] || die "device overlay not found: devices/$selected_device/.config"
-    preview_dir keep "$device_config" "$config_root" --exclude=/nvim
+    end4_layout_for_each_group device layout_preview_entry
 }
 
 preview_deployment() {
@@ -1135,44 +1218,15 @@ preview_deployment() {
 }
 
 sync_upstream_files() {
-    for_each_upstream_misc sync_entry
-    sync_dir "$(upstream_sync_mode)" "$repo_root/dots/.config/quickshell" "$config_root/quickshell"
-    sync_dir "$(upstream_sync_mode)" "$repo_root/dots/.config/fish" "$config_root/fish" --exclude=conf.d
-    sync_dir "$(upstream_sync_mode)" "$repo_root/dots/.config/fontconfig" "$config_root/fontconfig"
-    sync_dir "$(upstream_sync_mode)" "$repo_root/dots/.config/hypr/hyprland" "$config_root/hypr/hyprland"
-    sync_dir "$(upstream_sync_mode)" "$repo_root/dots/.config/hypr/custom" "$config_root/hypr/custom"
-    sync_dir "$(upstream_sync_mode)" "$repo_root/dots/.config/kitty" "$config_root/kitty"
-    sync_file "$repo_root/dots/.config/hypr/hyprland.lua" "$config_root/hypr/hyprland.lua"
-    sync_file "$repo_root/dots/.config/hypr/hyprlock.conf" "$config_root/hypr/hyprlock.conf"
-    sync_file "$repo_root/dots/.config/hypr/hypridle.conf" "$config_root/hypr/hypridle.conf"
-    if [[ -d "$repo_root/dots/.local/share/konsole" ]]; then
-        sync_dir keep "$repo_root/dots/.local/share/konsole" "$data_root/konsole"
-    fi
-    if [[ -f "$repo_root/dots/.local/share/icons/illogical-impulse.svg" ]]; then
-        sync_file "$repo_root/dots/.local/share/icons/illogical-impulse.svg" "$data_root/icons/illogical-impulse.svg"
-    fi
+    end4_layout_for_each_group upstream layout_sync_entry
 }
 
 apply_local_overlay() {
-    if [[ -d "$repo_root/local/.config" ]]; then
-        sync_dir keep "$repo_root/local/.config" "$config_root" --exclude=/nvim
-        if [[ -d "$nvim_source_root" ]]; then
-            create_nvim_stage
-            replace_nvim_tree "$nvim_stage_dir"
-            cleanup_nvim_stage
-        fi
-    fi
-    if [[ -d "$repo_root/local/.local" ]]; then
-        sync_dir keep "$repo_root/local/.local" "$user_home/.local"
-    fi
+    end4_layout_for_each_group local layout_sync_entry
 }
 
 apply_device_overlay() {
-    local selected_device="$1"
-    [[ -n "$selected_device" ]] || return 0
-    local device_config="$repo_root/devices/$selected_device/.config"
-    [[ -d "$device_config" ]] || die "device overlay not found: devices/$selected_device/.config"
-    sync_dir keep "$device_config" "$config_root" --exclude=/nvim
+    end4_layout_for_each_group device layout_sync_entry
 }
 
 run_deployment() {
@@ -1194,7 +1248,7 @@ run_shell_checks() {
     local check_file
     while IFS= read -r -d '' check_file; do
         if ! bash -n "$check_file"; then check_failed=1; fi
-    done < <(find "$repo_root/dots/.config/hypr/custom" "$repo_root/dots/.config/quickshell/ii/scripts" "$repo_root/local" "$repo_root/devices" -type f -name '*.sh' -print0 2>/dev/null)
+    done < <(find "$repo_root/dots/.config/hypr/custom" "$repo_root/dots/.config/quickshell/ii/scripts" "$repo_root/local" "$repo_root/devices" "$repo_root/tools" -type f -name '*.sh' -print0 2>/dev/null)
     bash -n "$repo_root/end4" || check_failed=1
     return "$check_failed"
 }
@@ -1216,7 +1270,7 @@ run_python_checks() {
         if ! python3 -c 'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"), filename=sys.argv[1])' "$check_file"; then
             check_failed=1
         fi
-    done < <(find "$repo_root/dots/.config/hypr/custom" "$repo_root/dots/.config/quickshell/ii/scripts" "$repo_root/local" "$repo_root/devices" "$repo_root/tools" -type f -name '*.py' -print0 2>/dev/null)
+    done < <(find "$repo_root/dots/.config/hypr" "$repo_root/dots/.config/quickshell/ii/scripts" "$repo_root/local" "$repo_root/devices" "$repo_root/tools" -type f -name '*.py' -print0 2>/dev/null)
     return "$check_failed"
 }
 
@@ -1269,6 +1323,7 @@ run_checks() {
 }
 
 apply_configs() {
+    require_no_dev_session
     require_clean_worktree
     require_no_merge
     [[ "$prompt_for_device" == true ]] && choose_device
@@ -1300,6 +1355,7 @@ system_update() {
 }
 
 discard_local_state() {
+    require_no_dev_session
     require_repo
     local status_output clean_preview
     status_output="$(git_at_repo status --short)"
@@ -1401,7 +1457,16 @@ if [[ "$command_name" == system ]]; then
     shift || true
 fi
 
-case "$command_name" in
+    case "$command_name" in
+    dev)
+        [[ -f "$repo_root/tools/end4-dev.sh" ]] || die 'development helper is missing: tools/end4-dev.sh'
+        exec env \
+            END4_REPO_ROOT="$repo_root" \
+            END4_CONFIG_ROOT="$config_root" \
+            END4_DATA_ROOT="$data_root" \
+            END4_STATE_ROOT="$state_root" \
+            bash "$repo_root/tools/end4-dev.sh" "$@"
+        ;;
     nvim)
         nvim_subcommand="${1:-status}"
         shift || true

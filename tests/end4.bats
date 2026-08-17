@@ -11,6 +11,8 @@ setup() {
     cp "$BATS_TEST_DIRNAME/../end4" "$repo/end4"
     chmod +x "$repo/end4"
     mkdir -p "$repo/tools"
+    cp "$BATS_TEST_DIRNAME/../tools/end4-layout.sh" "$repo/tools/"
+    cp "$BATS_TEST_DIRNAME/../tools/end4-dev.sh" "$repo/tools/"
     cp "$BATS_TEST_DIRNAME/../tools/end4-nvim-health.lua" "$repo/tools/"
     cp "$BATS_TEST_DIRNAME/../tools/end4-nvim-sync.lua" "$repo/tools/"
     mkdir -p \
@@ -325,6 +327,107 @@ run_end4_with_path() {
     [ -e "$repo/dots/.config/hypr/unrelated.py" ]
 }
 
+@test "dev mode links managed files, preserves extras, and restores stable live state" {
+    mkdir -p "$home/config/hypr/custom" "$home/config/quickshell/ii"
+    printf 'stable live value\n' > "$home/config/hypr/custom/general.lua"
+    printf 'live extra\n' > "$home/config/quickshell/ii/live-extra.conf"
+
+    run run_end4 dev start feature/live --no-watch --yes
+
+    [ "$status" -eq 0 ]
+    worktree="$(git -C "$repo" worktree list --porcelain | awk -v root="$repo" '
+        /^worktree / { path=substr($0, 10) }
+        /^branch refs\/heads\/feature\/live$/ && path != root { print path; exit }
+    ')"
+    [ -n "$worktree" ]
+    [ -L "$home/config/hypr/custom/general.lua" ]
+    [ "$(readlink "$home/config/hypr/custom/general.lua")" = "$worktree/dots/.config/hypr/custom/general.lua" ]
+    [ -e "$home/config/quickshell/ii/live-extra.conf" ]
+
+    printf 'experimental live value\n' > "$home/config/hypr/custom/general.lua"
+    [ "$(<"$worktree/dots/.config/hypr/custom/general.lua")" = 'experimental live value' ]
+
+    run run_end4 dev stop --yes
+
+    [ "$status" -eq 0 ]
+    [ "$(<"$home/config/hypr/custom/general.lua")" = 'stable live value' ]
+    [ ! -L "$home/config/hypr/custom/general.lua" ]
+    [ "$(<"$home/config/quickshell/ii/live-extra.conf")" = 'live extra' ]
+    [[ "$output" == *"Snapshot retained"* ]]
+}
+
+@test "dev capture adopts live-only files into the local overlay" {
+    mkdir -p "$home/config/quickshell/ii" "$home/config/hypr"
+    printf 'capture me\n' > "$home/config/quickshell/ii/captured.conf"
+    printf 'monitor capture\n' > "$home/config/hypr/monitors.conf"
+
+    run run_end4 dev start feature/capture --no-watch --yes
+    [ "$status" -eq 0 ]
+    worktree="$(git -C "$repo" worktree list --porcelain | awk -v root="$repo" '
+        /^worktree / { path=substr($0, 10) }
+        /^branch refs\/heads\/feature\/capture$/ && path != root { print path; exit }
+    ')"
+    [ -n "$worktree" ]
+
+    run run_end4 dev capture --yes
+
+    [ "$status" -eq 0 ]
+    [ -f "$worktree/local/.config/quickshell/ii/captured.conf" ]
+    [ -f "$worktree/local/.config/hypr/monitors.conf" ]
+    [ -L "$home/config/quickshell/ii/captured.conf" ]
+    [ -L "$home/config/hypr/monitors.conf" ]
+    [ "$(<"$worktree/local/.config/quickshell/ii/captured.conf")" = 'capture me' ]
+    [ "$(<"$worktree/local/.config/hypr/monitors.conf")" = 'monitor capture' ]
+
+    run run_end4 dev stop --keep --yes
+
+    [ "$status" -eq 0 ]
+    [ ! -L "$home/config/quickshell/ii/captured.conf" ]
+    [ ! -L "$home/config/hypr/monitors.conf" ]
+    [ "$(<"$home/config/quickshell/ii/captured.conf")" = 'capture me' ]
+    [ "$(<"$home/config/hypr/monitors.conf")" = 'monitor capture' ]
+}
+
+@test "normal deployment is blocked while a development session is attached" {
+    run run_end4 dev start feature/guard --no-watch --yes
+    [ "$status" -eq 0 ]
+
+    run run_end4 update --general --dry-run
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"linked development session is active"* ]]
+
+    run run_end4 dev stop --yes
+    [ "$status" -eq 0 ]
+}
+
+@test "guided development integration prepares a non-committing merge" {
+    run run_end4 dev start feature/integrate --no-watch --yes
+    [ "$status" -eq 0 ]
+    worktree="$(git -C "$repo" worktree list --porcelain | awk -v root="$repo" '
+        /^worktree / { path=substr($0, 10) }
+        /^branch refs\/heads\/feature\/integrate$/ && path != root { print path; exit }
+    ')"
+    [ -n "$worktree" ]
+    printf 'return { feature = true }\n' > "$worktree/dots/.config/hypr/custom/general.lua"
+    git -C "$worktree" add dots/.config/hypr/custom/general.lua
+    git -C "$worktree" commit -qm 'feature change'
+
+    run run_end4 dev integrate feature/integrate --yes
+
+    [ "$status" -eq 0 ]
+    integration_output="$output"
+    [ -e "$repo/.git/MERGE_HEAD" ]
+    run git -C "$repo" diff --cached --name-only
+    [[ "$output" == *"dots/.config/hypr/custom/general.lua"* ]]
+    [[ "$integration_output" == *"feature/integrate"* ]]
+
+    run run_end4 discard --yes
+    [ "$status" -eq 0 ]
+    run run_end4 dev remove feature/integrate --yes
+    [ "$status" -eq 0 ]
+}
+
 @test "system wrapper honors an alternate repository root" {
     run env \
         END4_REPO_ROOT="$repo" \
@@ -347,5 +450,8 @@ run_end4_with_path() {
     grep -q "end4 merge" "$config_file"
     grep -q "end4 update" "$config_file"
     grep -q "end4 discard" "$config_file"
+    grep -q "end4 dev status" "$config_file"
+    grep -q "end4 dev capture" "$config_file"
+    grep -q "end4 dev stop --keep" "$config_file"
     grep -q "checkForConflicts: true" "$config_file"
 }

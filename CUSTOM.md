@@ -135,6 +135,77 @@ For compatibility, `./end4 apply` remains available with `--dry-run`,
 `--device`, `--force`, and `--prune`; the `system` interface is the preferred
 entry point.
 
+## Linked branch development
+
+Use a linked development worktree when a change needs several live iterations:
+
+```bash
+system dev start experiment --device DarkArch
+system dev status
+system dev check
+system dev reload all
+```
+
+The branch is created below
+`$XDG_STATE_HOME/end4/worktrees/` (normally
+`~/.local/state/end4/worktrees/`). Managed configuration files in the live
+tree become individual symlinks into that worktree. Editing `~/.config` then
+writes directly to the feature branch, so there is no deploy step for every
+small experiment. Directory links are deliberately avoided: live-only files,
+runtime state, and existing extras remain in place.
+
+When a branch adds files that were previously only in the live tree, review and
+classify them before they are linked:
+
+```bash
+system dev capture
+system dev refresh       # pick up newly created or deleted branch files
+system dev sync          # synchronize Neovim plugins when needed
+```
+
+Capture asks whether each unlinked file should be adopted into the branch,
+ignored for this session, or left untouched. `system dev capture --yes` adopts
+all non-runtime candidates and is intended for deliberate automation.
+
+The development watcher reloads Hyprland and Quickshell when `inotifywait` is
+available. Otherwise use `system dev reload hypr`,
+`system dev reload quickshell`, or `system dev reload all`; Neovim is always
+reloaded explicitly by restarting the editor. The Quickshell developer IPC is
+provided by the `end4Dev` handler in `shell.qml`.
+
+End a test session with one of these explicit policies:
+
+```bash
+system dev stop          # restore the pre-session live snapshot (default)
+system dev stop --keep   # materialize the tested files as regular live files
+```
+
+Snapshots are retained below `$XDG_STATE_HOME/end4/dev/snapshots/`. The normal
+`merge`, `review`, `update`, `discard`, and standalone Neovim maintenance
+commands refuse to run while a linked session is active, preventing the main
+checkout or stable live state from being changed behind the session's back.
+
+Once the feature branch is clean and committed, integrate it from the main
+checkout:
+
+```bash
+system dev integrate experiment
+# review the prepared, non-committing merge in LazyGit
+git status
+git add ...
+git commit -m 'Integrate experiment'
+system dev remove experiment --delete-branch
+```
+
+Integration runs the branch checks, prepares `git merge --no-ff --no-commit`,
+and leaves the result for the same per-file conflict decisions used by
+`system merge`. It never commits automatically. If the branch is not ready,
+leave the worktree in place and continue with `system dev attach experiment`.
+
+LazyGit's `Ctrl-G` maintenance menu includes the upstream review/merge/update/
+discard actions and, while a development session is active, status, refresh,
+capture, reload, and both stop policies.
+
 ## Neovim lifecycle
 
 The repository copy at `local/.config/nvim` is authoritative. It includes the
