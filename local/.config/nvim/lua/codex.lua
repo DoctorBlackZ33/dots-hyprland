@@ -7,6 +7,33 @@ local state = {
   research_chat = nil,
 }
 
+local function config_root()
+  return vim.env.END4_NVIM_CONFIG or vim.fn.stdpath("config")
+end
+
+local function codex_acp_version()
+  local version_file = config_root() .. "/codex-acp.version"
+  if vim.fn.filereadable(version_file) == 1 then
+    local version = vim.fn.readfile(version_file)[1]
+    if version and version:match("^%d+%.%d+%.%d+$") then
+      return version
+    end
+    error("invalid Codex ACP version in " .. version_file)
+  end
+
+  -- Keep an existing deployed configuration usable during the migration. New
+  -- repository-owned configurations always carry codex-acp.version.
+  return "1.4.0"
+end
+
+local function codex_path()
+  local configured = vim.env.CODEX_PATH
+  if configured and configured ~= "" then
+    return configured
+  end
+  return vim.fn.exepath("codex")
+end
+
 local RESEARCH_SYSTEM_PROMPT = [[
 You are Codex Research running inside Neovim.
 
@@ -145,7 +172,13 @@ local function adapter(name, mode, formatted_name)
       name = name,
       formatted_name = formatted_name,
       commands = {
-        default = { "npx", "-y", "@agentclientprotocol/codex-acp" },
+        default = {
+          "npx",
+          "--yes",
+          "--package",
+          "@agentclientprotocol/codex-acp@" .. codex_acp_version(),
+          "codex-acp",
+        },
       },
       defaults = {
         auth_method = "chat-gpt",
@@ -153,7 +186,7 @@ local function adapter(name, mode, formatted_name)
         timeout = 30000,
       },
       env = {
-        CODEX_PATH = "/usr/bin/codex",
+        CODEX_PATH = codex_path(),
         INITIAL_AGENT_MODE = mode,
         -- The preset declares this key for API-key users. Keep it empty when
         -- ChatGPT auth is selected instead of passing the preset's placeholder
