@@ -329,6 +329,15 @@ run_lazygit() {
     fi
 }
 
+ensure_repo_lazygit_config() {
+    local source_config="$repo_root/local/.config/lazygit/config.yml"
+    local repo_config="$repo_root/.git/lazygit.yml"
+    [[ -f "$source_config" ]] || return 0
+    [[ -e "$repo_config" || -L "$repo_config" ]] && return 0
+    ln -s ../local/.config/lazygit/config.yml "$repo_config" || \
+        printf 'end4: warning: could not install the repository LazyGit config\n' >&2
+}
+
 launch_lazygit_review() {
     if [[ "$from_lazygit" == 1 ]]; then
         return 0
@@ -832,6 +841,7 @@ discard_local_state() {
 system_tui() {
     require_repo
     command -v lazygit >/dev/null 2>&1 || die 'LazyGit is not installed; install it or use the Git command line'
+    ensure_repo_lazygit_config
     run_lazygit
 }
 
