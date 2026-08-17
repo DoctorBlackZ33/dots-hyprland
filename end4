@@ -32,6 +32,7 @@ Unified system workflow:
   update [options]               Preview, confirm, and deploy committed config
   discard [--yes]                Abort merge and discard uncommitted changes
   tui                            Open LazyGit for this repository
+  review                         Compare common base, fork, and upstream
 
 System update options:
   --device NAME                  Apply General plus a named device overlay
@@ -182,21 +183,141 @@ print_merge_state() {
     fi
 }
 
-write_incoming_report() {
-    local report_file="$1"
-    {
-        printf 'end-4 upstream merge preview\n'
-        printf 'Repository: %s\n' "$repo_root"
-        printf 'Local HEAD: %s\n' "$(git_at_repo log -1 --format='%h %s')"
-        printf 'Upstream:   %s\n\n' "$(git_at_repo log -1 --format='%h %s' "$upstream_ref")"
+build_review_entries() {
+    local base_ref="$1"
+    local upstream_ref_name="$2"
+    local output_file="$3"
+    local path upstream_changed custom_changed marker
 
-        printf '%s\n' 'Incoming commits (HEAD..upstream/main):'
-        git_at_repo log --oneline --decorate "HEAD..$upstream_ref"
-        printf '\n%s\n' 'Incoming file summary:'
-        git_at_repo diff --stat HEAD "$upstream_ref"
-        printf '\n%s\n' 'Full incoming diff:'
-        git_at_repo diff --color=always HEAD "$upstream_ref"
+    {
+        git_at_repo diff --name-only "$base_ref" "$upstream_ref_name" || true
+        git_at_repo diff --name-only "$base_ref" HEAD || true
+    } | sort -u | while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        upstream_changed=false
+        custom_changed=false
+        if ! git_at_repo diff --quiet "$base_ref" "$upstream_ref_name" -- "$path"; then
+            upstream_changed=true
+        fi
+        if ! git_at_repo diff --quiet "$base_ref" HEAD -- "$path"; then
+            custom_changed=true
+        fi
+        if [[ "$upstream_changed" == true && "$custom_changed" == true ]]; then
+            marker=UC
+        elif [[ "$upstream_changed" == true ]]; then
+            marker=U
+        else
+            marker=C
+        fi
+        printf '%s\t%s\n' "$marker" "$path"
+    done > "$output_file"
+}
+
+materialize_review_file() {
+    local ref="$1"
+    local path="$2"
+    local destination="$3"
+    local object_type
+
+    mkdir -p "$(dirname -- "$destination")"
+    object_type="$(git_at_repo cat-file -t "$ref:$path" 2>/dev/null || true)"
+    if [[ "$object_type" == blob ]]; then
+        git_at_repo show "$ref:$path" > "$destination"
+    else
+        printf '[%s: file is absent in this revision]\n' "$ref" > "$destination"
+    fi
+}
+
+review_one_file() {
+    local base_ref="$1"
+    local path="$2"
+    local temporary_root base_file fork_file upstream_file
+    temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/end4-review.XXXXXX")"
+    base_file="$temporary_root/BASE-common-ancestor/$path"
+    fork_file="$temporary_root/FORK-custom-main/$path"
+    upstream_file="$temporary_root/UPSTREAM-end4-main/$path"
+
+    materialize_review_file "$base_ref" "$path" "$base_file"
+    materialize_review_file HEAD "$path" "$fork_file"
+    materialize_review_file "$upstream_ref" "$path" "$upstream_file"
+
+    printf '\n3-way review: %s\n' "$path"
+    printf '  left   = BASE common ancestor\n'
+    printf '  middle = FORK custom main (ours)\n'
+    printf '  right  = UPSTREAM end-4 main (theirs)\n'
+    if command -v nvim >/dev/null 2>&1; then
+        nvim -d "$base_file" "$fork_file" "$upstream_file" || true
+    elif command -v vimdiff >/dev/null 2>&1; then
+        vimdiff "$base_file" "$fork_file" "$upstream_file" || true
+    fi
+    rm -rf -- "$temporary_root"
+}
+
+show_comparison_fallback() {
+    local base_ref="$1"
+    local report_file
+    report_file="$(mktemp "${TMPDIR:-/tmp}/end4-review-report.XXXXXX")"
+    {
+        printf 'end-4 comparison fallback\n\n'
+        printf "BASE -> FORK (this fork's changes):\n"
+        git_at_repo diff --color=always "$base_ref" HEAD
+        printf "\nBASE -> UPSTREAM (end-4's changes):\n"
+        git_at_repo diff --color=always "$base_ref" "$upstream_ref"
     } > "$report_file"
+    show_paged_report "$report_file" || true
+    rm -f -- "$report_file"
+}
+
+review_changes() {
+    local base_ref entries_file path_count upstream_count custom_count
+    base_ref="$(git_at_repo merge-base HEAD "$upstream_ref")" || die 'could not find a common base with upstream/main'
+    entries_file="$(mktemp "${TMPDIR:-/tmp}/end4-review-files.XXXXXX")"
+    build_review_entries "$base_ref" "$upstream_ref" "$entries_file"
+
+    upstream_count="$(git_at_repo rev-list --count "$base_ref..$upstream_ref")"
+    custom_count="$(git_at_repo rev-list --count "$base_ref..HEAD")"
+    path_count="$(wc -l < "$entries_file")"
+
+    printf '\nend-4 three-way comparison\n'
+    printf '  BASE:     %s\n' "$(git_at_repo log -1 --format='%h %s' "$base_ref")"
+    printf '  FORK:     %s\n' "$(git_at_repo log -1 --format='%h %s' HEAD)"
+    printf '  UPSTREAM: %s\n' "$(git_at_repo log -1 --format='%h %s' "$upstream_ref")"
+    printf '  Commits since BASE: %d fork, %d upstream\n' "$custom_count" "$upstream_count"
+    printf '  Files changed by either side: %d\n' "$path_count"
+    printf '\nFork changes (BASE -> FORK):\n'
+    git_at_repo diff --stat "$base_ref" HEAD
+    printf '\nUpstream changes (BASE -> UPSTREAM):\n'
+    git_at_repo diff --stat "$base_ref" "$upstream_ref"
+    printf '\nFile ownership markers: U = upstream changed, C = fork changed, UC = both changed.\n'
+    sed 's/\t/  /' "$entries_file"
+
+    if [[ "$path_count" -eq 0 ]]; then
+        rm -f -- "$entries_file"
+        printf '\nNo file changes need review.\n'
+        return 0
+    fi
+
+    if has_interactive_tty && command -v fzf >/dev/null 2>&1 && \
+        { command -v nvim >/dev/null 2>&1 || command -v vimdiff >/dev/null 2>&1; }; then
+        local selected_files
+        printf '\nSelect one or more files to open in a 3-pane diff.\n'
+        selected_files="$(fzf --multi --height=80% --layout=reverse --border \
+            --prompt='review files > ' \
+            --header='UC = both sides changed; U = upstream only; C = fork only. Enter opens selected files.' \
+            < "$entries_file")" || true
+        if [[ -n "$selected_files" ]]; then
+            while IFS=$'\t' read -r _ path; do
+                [[ -n "$path" ]] || continue
+                review_one_file "$base_ref" "$path"
+            done <<< "$selected_files"
+        fi
+    elif has_interactive_tty; then
+        printf '\nA 3-pane editor review needs fzf and nvim/vimdiff; showing a colored fallback instead.\n'
+        show_comparison_fallback "$base_ref"
+    else
+        printf '\nInteractive review is unavailable on this terminal; use system review in a TTY.\n'
+    fi
+    rm -f -- "$entries_file"
 }
 
 run_lazygit() {
@@ -239,18 +360,12 @@ merge_upstream() {
         return 0
     fi
 
-    local report_file
-    report_file="$(mktemp "${TMPDIR:-/tmp}/end4-merge-report.XXXXXX")"
-    write_incoming_report "$report_file"
-    printf '\nIncoming changes are shown below.\n\n'
-    show_paged_report "$report_file" || true
+    review_changes
 
-    if ! confirm_action 'Start a non-committing merge of upstream/main into this fork?'; then
-        rm -f -- "$report_file"
+    if ! confirm_action 'Start a non-committing merge of upstream/main into this fork after this review?'; then
         printf 'Merge cancelled.\n'
         return 0
     fi
-    rm -f -- "$report_file"
 
     printf '\nStarting a non-committing merge.\n'
     local merge_status=0
@@ -271,6 +386,23 @@ merge_upstream() {
     fi
 
     printf '\nReview with LazyGit or git diff --cached, then run system check and commit the merge.\n'
+}
+
+review_upstream() {
+    require_clean_worktree
+    require_no_merge
+
+    printf 'Fetching upstream...\n'
+    git_at_repo fetch --prune upstream || die 'unable to fetch upstream'
+    require_upstream_ref
+
+    local incoming_count
+    incoming_count="$(git_at_repo rev-list --count "HEAD..$upstream_ref")"
+    if [[ "$incoming_count" -eq 0 ]]; then
+        printf 'Already synchronized with upstream/main. No comparison required.\n'
+        return 0
+    fi
+    review_changes
 }
 
 device_is_known() {
@@ -709,6 +841,7 @@ system_menu() {
     if has_whiptail_tty; then
         selected="$(whiptail --title 'end-4 system maintenance' \
             --menu 'Choose an operation:' 18 86 8 \
+            review 'Compare fork and upstream without merging' \
             merge 'Fetch and review upstream changes' \
             update 'Preview and deploy committed configuration' \
             discard 'Abort merge and discard uncommitted Git state' \
@@ -720,24 +853,27 @@ system_menu() {
             die 'the system menu requires an interactive terminal; use system merge/update/discard/tui directly'
         fi
         printf '\nend-4 system maintenance\n\n'
-        printf '  1) merge    Fetch and review upstream changes\n'
-        printf '  2) update   Preview and deploy committed configuration\n'
-        printf '  3) discard  Abort merge and discard uncommitted Git state\n'
-        printf '  4) tui      Open the repository in LazyGit\n'
-        printf '  5) quit     Return without changing anything\n'
+        printf '  1) review   Compare fork and upstream without merging\n'
+        printf '  2) merge    Fetch and review upstream changes\n'
+        printf '  3) update   Preview and deploy committed configuration\n'
+        printf '  4) discard  Abort merge and discard uncommitted Git state\n'
+        printf '  5) tui      Open the repository in LazyGit\n'
+        printf '  6) quit     Return without changing anything\n'
         local choice
-        read -r -p 'Choose an operation [5]: ' choice < /dev/tty
-        case "${choice:-5}" in
-            1) selected=merge ;;
-            2) selected=update ;;
-            3) selected=discard ;;
-            4) selected=tui ;;
-            5) selected=quit ;;
+        read -r -p 'Choose an operation [6]: ' choice < /dev/tty
+        case "${choice:-6}" in
+            1) selected=review ;;
+            2) selected=merge ;;
+            3) selected=update ;;
+            4) selected=discard ;;
+            5) selected=tui ;;
+            6) selected=quit ;;
             *) die 'invalid menu selection' ;;
         esac
     fi
 
     case "$selected" in
+        review) review_upstream ;;
         merge) merge_upstream ;;
         update) system_update ;;
         discard) discard_local_state ;;
@@ -758,6 +894,16 @@ case "$command_name" in
     status|report)
         require_repo
         print_git_status
+        ;;
+    review|compare)
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -h|--help) usage; exit 0 ;;
+                *) die "unknown review option: $1" ;;
+            esac
+        done
+        require_repo
+        review_upstream
         ;;
     merge)
         while [[ $# -gt 0 ]]; do

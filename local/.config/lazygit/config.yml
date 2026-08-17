@@ -1,9 +1,14 @@
 # end-4 system maintenance commands. LazyGit remains the Git review engine;
 # these entries provide one place to start the fork-specific workflow.
 customCommands:
-  - key: 'S'
+  - key: '<c-g>'
     description: 'end-4 system maintenance'
     commandMenu:
+      - key: 'r'
+        description: 'Compare fork and upstream (3-way review)'
+        command: 'END4_FROM_LAZYGIT=1 /home/black/end4_custom/end4 review'
+        context: 'global'
+        output: terminal
       - key: 'm'
         description: 'Merge and review upstream/main'
         command: 'END4_FROM_LAZYGIT=1 /home/black/end4_custom/end4 merge'

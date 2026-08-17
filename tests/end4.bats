@@ -119,6 +119,26 @@ make_upstream_commit() {
     [ "$output" = 'custom conflict change' ]
 }
 
+@test "review gives a structured three-way summary without dumping a raw patch" {
+    printf 'fork value\n' > "$repo/review.conf"
+    git -C "$repo" add review.conf
+    git -C "$repo" commit -qm 'custom review change'
+    printf 'upstream value\n' > "$updater/review.conf"
+    git -C "$updater" add review.conf
+    git -C "$updater" commit -qm 'upstream review change'
+    git -C "$updater" push -q origin main
+
+    run run_end4 review
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"BASE:"* ]]
+    [[ "$output" == *"FORK:"* ]]
+    [[ "$output" == *"UPSTREAM:"* ]]
+    [[ "$output" == *"UC  review.conf"* ]]
+    [[ "$output" != *"Full incoming diff"* ]]
+    [[ "$output" != *"<<<<<<<"* ]]
+}
+
 @test "discard aborts an active merge before cleaning local state" {
     printf 'fork value\n' > "$repo/abort.conf"
     git -C "$repo" add abort.conf
@@ -209,8 +229,9 @@ make_upstream_commit() {
     local config_file="$BATS_TEST_DIRNAME/../local/.config/lazygit/config.yml"
 
     [ -f "$config_file" ]
-    grep -q "key: 'S'" "$config_file"
+    grep -q "key: '<c-g>'" "$config_file"
     grep -q "commandMenu:" "$config_file"
+    grep -q "end4 review" "$config_file"
     grep -q "end4 merge" "$config_file"
     grep -q "end4 update" "$config_file"
     grep -q "end4 discard" "$config_file"

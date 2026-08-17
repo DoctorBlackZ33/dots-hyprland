@@ -21,10 +21,12 @@ treated as a complete upstream directory. It is applied additively by
 system
 ```
 
-The menu offers four operations:
+The menu offers five operations:
 
-- `merge`: fetch `upstream/main`, show the complete incoming commit/file diff,
-  and prepare a non-committing Git merge.
+- `merge`: fetch `upstream/main`, open a structured three-way review, and
+  prepare a non-committing Git merge.
+- `review`: compare the common base, this fork, and upstream without starting
+  a merge.
 - `update`: run checks, show a deployment dry-run, ask for a target device, and
   deploy only after confirmation.
 - `discard`: after a typed `DISCARD` confirmation, abort an active merge,
@@ -35,6 +37,7 @@ The direct equivalents are:
 
 ```bash
 system merge
+system review
 system update
 system update --dry-run
 system discard
@@ -47,11 +50,26 @@ files from an external cache.
 
 ## Reviewing an upstream merge
 
-`system merge` requires a clean worktree, fetches upstream, displays the full
-incoming report, and leaves the merge uncommitted. LazyGit is opened for the
-review when it is available. Its conflict view lets you resolve each file/hunk
-by choosing ours (this fork), theirs (upstream), both, or opening an editor for
-manual resolution. The merge is never committed automatically.
+`system merge` requires a clean worktree and fetches upstream. It first shows a
+compact comparison with three explicit roles:
+
+- `BASE`: the common ancestor before either side changed.
+- `FORK`: this repository's `main` branch, or “ours”.
+- `UPSTREAM`: end-4's `upstream/main`, or “theirs”.
+
+Select files from the review list. Each selected file opens in a three-pane
+`nvim -d` view in the order `BASE | FORK | UPSTREAM`, with normal syntax-aware
+diff highlighting. Files marked `UC` changed on both sides and deserve the
+closest review. The review is read-only and uses temporary snapshots.
+
+After the comparison, the command prepares a non-committing Git merge.
+LazyGit then handles actual conflicts: its conflict view lets you resolve each
+file/hunk by choosing ours (this fork), theirs (upstream), both, or opening an
+editor for manual resolution. The merge is never committed automatically.
+
+Inside LazyGit, press `Ctrl-G` and choose `r` for the comparison or `m` to run
+the full review-plus-merge flow. LazyGit's own ref comparison (`W`) remains
+useful for a quick two-ref view.
 
 After resolving conflicts:
 
