@@ -47,6 +47,22 @@ vim.defer_fn(function()
     assert(command_exists("CodeCompanion"), "missing :CodeCompanion")
   end)
 
+  check("Codex keymaps", function()
+    for _, mapping in ipairs({
+      { mode = "n", lhs = "<leader>zc", desc = "Codex Chat" },
+      { mode = "n", lhs = "<leader>za", desc = "Codex Ask" },
+      { mode = "n", lhs = "<leader>zf", desc = "Codex Quick Fix" },
+      { mode = "n", lhs = "<leader>zr", desc = "Codex Research" },
+      { mode = "n", lhs = "<leader>zR", desc = "Preview Codex Research" },
+      { mode = "v", lhs = "<leader>za", desc = "Codex Ask Selection" },
+      { mode = "v", lhs = "<leader>zf", desc = "Codex Fix Selection" },
+    }) do
+      local keymap = vim.fn.maparg(mapping.lhs, mapping.mode, false, true)
+      assert(type(keymap) == "table" and keymap.lhs ~= "", "missing " .. mapping.mode .. " " .. mapping.lhs)
+      assert(keymap.desc == mapping.desc, "unexpected description for " .. mapping.lhs)
+    end
+  end)
+
   check("Codex executable", function()
     local path = vim.env.CODEX_PATH or vim.fn.exepath("codex")
     assert(path ~= "", "codex is not on PATH and CODEX_PATH is unset")

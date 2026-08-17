@@ -10,6 +10,7 @@ return {
       { "<leader>o", group = "Overseer", icon = "󰒲" },
       { "<leader>r", group = "Remote", icon = "󰢹" },
       { "<leader>y", group = "YAML", icon = "󰈙" },
+      { "<leader>z", group = "Codex", icon = "󰚩" },
     })
     return opts
   end,

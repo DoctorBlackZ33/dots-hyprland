@@ -524,17 +524,17 @@ end
 
 local function create_keymaps()
   local opts = { noremap = true, silent = true }
-  vim.keymap.set("n", "<leader>cc", "<cmd>CodexChat<cr>", vim.tbl_extend("force", opts, { desc = "Codex Chat" }))
-  vim.keymap.set("n", "<leader>ca", function()
+  vim.keymap.set("n", "<leader>zc", "<cmd>CodexChat<cr>", vim.tbl_extend("force", opts, { desc = "Codex Chat" }))
+  vim.keymap.set("n", "<leader>za", function()
     M.ask({})
   end, vim.tbl_extend("force", opts, { desc = "Codex Ask" }))
-  vim.keymap.set("n", "<leader>cf", function()
+  vim.keymap.set("n", "<leader>zf", function()
     M.fix({})
   end, vim.tbl_extend("force", opts, { desc = "Codex Quick Fix" }))
-  vim.keymap.set("n", "<leader>cr", "<cmd>CodexResearch<cr>", vim.tbl_extend("force", opts, { desc = "Codex Research" }))
-  vim.keymap.set("n", "<leader>cR", "<cmd>CodexResearchPreview<cr>", vim.tbl_extend("force", opts, { desc = "Preview Codex Research" }))
-  vim.keymap.set("v", "<leader>ca", ":CodexAsk<CR>", vim.tbl_extend("force", opts, { desc = "Codex Ask Selection" }))
-  vim.keymap.set("v", "<leader>cf", ":CodexFix<CR>", vim.tbl_extend("force", opts, { desc = "Codex Fix Selection" }))
+  vim.keymap.set("n", "<leader>zr", "<cmd>CodexResearch<cr>", vim.tbl_extend("force", opts, { desc = "Codex Research" }))
+  vim.keymap.set("n", "<leader>zR", "<cmd>CodexResearchPreview<cr>", vim.tbl_extend("force", opts, { desc = "Preview Codex Research" }))
+  vim.keymap.set("v", "<leader>za", ":CodexAsk<CR>", vim.tbl_extend("force", opts, { desc = "Codex Ask Selection" }))
+  vim.keymap.set("v", "<leader>zf", ":CodexFix<CR>", vim.tbl_extend("force", opts, { desc = "Codex Fix Selection" }))
 end
 
 local function configure_chat_ui()
@@ -546,7 +546,7 @@ local function configure_chat_ui()
       vim.opt_local.wrap = true
       vim.opt_local.linebreak = true
       vim.opt_local.conceallevel = 2
-      vim.keymap.set("n", "<leader>cR", "<cmd>CodexResearchPreview<cr>", {
+      vim.keymap.set("n", "<leader>zR", "<cmd>CodexResearchPreview<cr>", {
         buffer = event.buf,
         desc = "Preview Codex Research with Mermaid",
         silent = true,

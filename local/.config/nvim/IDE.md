@@ -88,11 +88,17 @@ available as current Mason packages on this host.
 Overseer is available with `<leader>ow`; all shortcuts above create visible
 Overseer tasks whose output and status can be revisited there.
 
-## Key groups and Yazi
+## Codex, key groups, and Yazi
+
+Codex is available under the `<leader>z` Which-key group:
+`<leader>zc` opens chat, `<leader>za` asks about the current file or selection,
+`<leader>zf` runs a reviewed quick fix, `<leader>zr` opens the research
+workspace, and `<leader>zR` previews the research report. The direct commands
+`:CodexChat`, `:CodexAsk`, and `:CodexFix` are also available.
 
 Which-key labels and icons are registered for Actions (`<leader>a`), IDE
 (`i`), Java (`j`), Kubernetes (`k`), Overseer (`o`), Remote (`r`), and YAML
-(`y`). Yazi opens with `<leader>fy`.
+(`y`), and Codex (`z`). Yazi opens with `<leader>fy`.
 
 Yazi's Neovim integration actions use `F1` through `F11` inside the Yazi
 terminal buffer. `F1` shows help; `F2`/`F3`/`F4` open vertical, horizontal, or
