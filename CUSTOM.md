@@ -148,6 +148,7 @@ Use these commands when investigating or intentionally changing Neovim:
 system nvim status
 system nvim diff
 system nvim check
+system nvim deploy
 system nvim import
 system nvim sync
 system nvim rollback

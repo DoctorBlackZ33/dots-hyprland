@@ -308,6 +308,23 @@ run_end4_with_path() {
     [[ "$output" == *"repository Neovim tree is incomplete; missing init.lua"* ]]
 }
 
+@test "scoped nvim deploy ignores unrelated dirty repository paths" {
+    make_nvim_source_fixture
+    git -C "$repo" add local/.config/nvim
+    git -C "$repo" commit -qm 'fixture committed nvim config'
+    printf 'unrelated user change\n' > "$repo/dots/.config/hypr/unrelated.py"
+    fake_bin="$test_root/fake-bin"
+    mkdir -p "$fake_bin"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$fake_bin/nvim"
+    chmod +x "$fake_bin/nvim"
+
+    run run_end4_with_path "$fake_bin" nvim deploy --yes
+
+    [ "$status" -eq 0 ]
+    [ -e "$home/config/nvim/.end4-managed" ]
+    [ -e "$repo/dots/.config/hypr/unrelated.py" ]
+}
+
 @test "system wrapper honors an alternate repository root" {
     run env \
         END4_REPO_ROOT="$repo" \

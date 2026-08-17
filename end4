@@ -42,6 +42,7 @@ Neovim maintenance:
   nvim status                    Show source/live drift and recursive-tree health
   nvim diff                      Open a selectable colored source/live comparison
   nvim check                     Validate the complete config and Codex runtime
+  nvim deploy [--yes]            Deploy only the committed Neovim tree
   nvim import [--yes]            Adopt live Neovim files into the repository
   nvim sync                      Install plugins from lazy-lock.json
   nvim rollback [BACKUP]         Restore an archived Neovim configuration
@@ -1022,6 +1023,31 @@ nvim_check() {
     run_nvim_health "$nvim_source_root"
 }
 
+nvim_deploy() {
+    local nvim_status
+    require_repo
+    require_no_merge
+    nvim_status="$(git_at_repo status --porcelain -- local/.config/nvim)"
+    [[ -z "$nvim_status" ]] || {
+        printf '%s\n' "$nvim_status"
+        die 'repository Neovim files are not clean; commit or intentionally discard them first'
+    }
+    validate_nvim_tree "$nvim_source_root" 'repository Neovim tree' true
+    check_nvim_dependencies "$nvim_source_root" || die 'Neovim plugin dependencies are not synchronized'
+    run_nvim_health "$nvim_source_root"
+    preview_nvim_deployment
+    if ! confirm_action 'Deploy the committed Neovim tree and archive the current live configuration?'; then
+        printf 'Neovim deployment cancelled.\n'
+        return 0
+    fi
+    create_nvim_stage
+    if ! replace_nvim_tree "$nvim_stage_dir"; then
+        cleanup_nvim_stage
+        return 1
+    fi
+    cleanup_nvim_stage
+}
+
 for_each_upstream_misc() {
     local source_entry source_name
     shopt -s nullglob
@@ -1391,6 +1417,16 @@ case "$command_name" in
             check)
                 [[ $# -eq 0 ]] || die "unknown nvim check option: $1"
                 nvim_check
+                ;;
+            deploy)
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --yes) assume_yes=true; shift ;;
+                        -h|--help) usage; exit 0 ;;
+                        *) die "unknown nvim deploy option: $1" ;;
+                    esac
+                done
+                nvim_deploy
                 ;;
             import)
                 while [[ $# -gt 0 ]]; do
