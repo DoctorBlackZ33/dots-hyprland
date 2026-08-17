@@ -11,7 +11,11 @@ fi
 user_home="${HOME:?HOME is required}"
 config_root="${XDG_CONFIG_HOME:-$user_home/.config}"
 data_root="${XDG_DATA_HOME:-$user_home/.local/share}"
+state_root="${XDG_STATE_HOME:-$user_home/.local/state}"
 upstream_ref="${END4_UPSTREAM_REF:-upstream/main}"
+
+nvim_source_root="$repo_root/local/.config/nvim"
+nvim_live_root="$config_root/nvim"
 
 assume_yes=false
 device_name=''
@@ -34,6 +38,14 @@ Unified system workflow:
   tui                            Open LazyGit for this repository
   review                         Compare common base, fork, and upstream
 
+Neovim maintenance:
+  nvim status                    Show source/live drift and recursive-tree health
+  nvim diff                      Open a selectable colored source/live comparison
+  nvim check                     Validate the complete config and Codex runtime
+  nvim import [--yes]            Adopt live Neovim files into the repository
+  nvim sync                      Install plugins from lazy-lock.json
+  nvim rollback [BACKUP]         Restore an archived Neovim configuration
+
 System update options:
   --device NAME                  Apply General plus a named device overlay
   --general                      Apply the General configuration only
@@ -50,6 +62,7 @@ Other commands:
 Normal flow:
   system merge                   Review upstream changes in LazyGit
   system update                  Dry-run, choose a device, then deploy
+  system nvim check              Validate Neovim before deployment
   system discard                 Abort a merge or discard active uncommitted work
 EOF
 }
@@ -163,6 +176,7 @@ print_git_status() {
 
     printf '\nLive deployment differences are available with:\n'
     printf '  system update --dry-run\n'
+    printf '  system nvim status\n'
 }
 
 print_merge_state() {
@@ -557,6 +571,457 @@ sync_file() {
     cp -p "$source_file" "$target_file"
 }
 
+nvim_tree_has_recursive_lua() {
+    local tree="$1"
+    [[ -d "$tree/lua" ]] || return 1
+    find "$tree/lua" -mindepth 1 -type d -name lua -print -quit 2>/dev/null | grep -q .
+}
+
+validate_nvim_tree() {
+    local tree="$1"
+    local label="${2:-Neovim tree}"
+    local require_marker="${3:-false}"
+    local allow_recursive="${4:-false}"
+    local required
+
+    [[ -d "$tree" ]] || die "$label is missing: $tree"
+    for required in init.lua lazy-lock.json lua/codex.lua lua/plugins/codex.lua lua/config/lazy.lua; do
+        [[ -f "$tree/$required" ]] || die "$label is incomplete; missing $required"
+    done
+    if [[ "$allow_recursive" != true ]] && nvim_tree_has_recursive_lua "$tree"; then
+        die "$label contains recursive lua/lua directories: $tree/lua"
+    fi
+    if [[ "$require_marker" == true ]]; then
+        [[ -f "$tree/.end4-managed" ]] || die "$label is missing .end4-managed"
+        [[ -f "$tree/codex-acp.version" ]] || die "$label is missing codex-acp.version"
+    fi
+}
+
+check_nvim_dependencies() {
+    local tree="$1"
+    local expected_commit plugin_dir actual_commit
+    command -v python3 >/dev/null 2>&1 || {
+        printf 'end4: python3 is required to inspect lazy-lock.json\n' >&2
+        return 1
+    }
+    expected_commit="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("codecompanion.nvim", {}).get("commit", ""))' "$tree/lazy-lock.json" 2>/dev/null || true)"
+    if [[ -z "$expected_commit" ]]; then
+        printf 'end4: lazy-lock.json has no codecompanion.nvim entry; dependency check skipped for this fixture\n' >&2
+        return 0
+    fi
+    plugin_dir="$data_root/nvim/lazy/codecompanion.nvim"
+    if [[ ! -d "$plugin_dir" ]]; then
+        printf 'end4: locked codecompanion.nvim is not installed; run system nvim sync\n' >&2
+        return 1
+    fi
+    actual_commit="$(git -C "$plugin_dir" rev-parse HEAD 2>/dev/null || true)"
+    if [[ "$actual_commit" != "$expected_commit" ]]; then
+        printf 'end4: codecompanion.nvim drift: lock=%s installed=%s; run system nvim sync\n' "$expected_commit" "${actual_commit:-missing}"
+        return 1
+    fi
+    printf 'end4: codecompanion.nvim matches lazy-lock.json (%s)\n' "$expected_commit"
+}
+
+nvim_compare_entries() {
+    local left="$1"
+    local right="$2"
+    local output_file="$3"
+    local path marker left_file right_file
+
+    {
+        find "$left" -type f -printf '%P\n' 2>/dev/null || true
+        find "$right" -type f -printf '%P\n' 2>/dev/null || true
+    } | sort -u | while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        case "$path" in
+            .backup-themes/*|nvim.log|Untitled) continue ;;
+        esac
+        left_file="$left/$path"
+        right_file="$right/$path"
+
+        if [[ "$path" == lua/config/dynamic_colors.lua ]]; then
+            marker=G
+        elif [[ "$path" == lua/lua/* || "$path" == lua/lua ]]; then
+            marker=N
+        elif [[ -f "$left_file" && ! -f "$right_file" ]]; then
+            marker=S
+        elif [[ ! -f "$left_file" && -f "$right_file" ]]; then
+            marker=L
+        elif cmp -s "$left_file" "$right_file"; then
+            continue
+        else
+            marker=D
+        fi
+        printf '%s\t%s\n' "$marker" "$path"
+    done > "$output_file"
+}
+
+nvim_status_report() {
+    local entries_file difference_count source_only_count live_only_count generated_count recursive_count
+    entries_file="$(mktemp "${TMPDIR:-/tmp}/end4-nvim-status.XXXXXX")"
+
+    printf 'Neovim repository source: %s\n' "$nvim_source_root"
+    printf 'Neovim live target:       %s\n' "$nvim_live_root"
+    if [[ -d "$nvim_source_root" ]]; then
+        if [[ -f "$nvim_source_root/init.lua" &&
+            -f "$nvim_source_root/lazy-lock.json" &&
+            -f "$nvim_source_root/lua/codex.lua" &&
+            -f "$nvim_source_root/lua/plugins/codex.lua" &&
+            -f "$nvim_source_root/lua/config/lazy.lua" &&
+            -f "$nvim_source_root/.end4-managed" &&
+            -f "$nvim_source_root/codex-acp.version" ]] &&
+            ! nvim_tree_has_recursive_lua "$nvim_source_root"; then
+            printf 'Repository shape:         valid complete managed tree\n'
+        else
+            printf 'Repository shape:         INVALID\n'
+        fi
+    else
+        printf 'Repository shape:         absent (Neovim deployment is disabled)\n'
+    fi
+
+    if [[ -d "$nvim_live_root" ]]; then
+        printf 'Live target:              present\n'
+    else
+        printf 'Live target:              absent\n'
+    fi
+
+    if nvim_tree_has_recursive_lua "$nvim_live_root"; then
+        recursive_count="$(find "$nvim_live_root/lua" -mindepth 1 -type d -name lua -print 2>/dev/null | wc -l)"
+        printf 'Recursive Lua trees:      %s (cleanup required)\n' "$recursive_count"
+    else
+        printf 'Recursive Lua trees:      none\n'
+    fi
+
+    nvim_compare_entries "$nvim_source_root" "$nvim_live_root" "$entries_file"
+    difference_count="$(awk -F '\t' '$1 == "D" { count++ } END { print count + 0 }' "$entries_file")"
+    source_only_count="$(awk -F '\t' '$1 == "S" { count++ } END { print count + 0 }' "$entries_file")"
+    live_only_count="$(awk -F '\t' '$1 == "L" { count++ } END { print count + 0 }' "$entries_file")"
+    generated_count="$(awk -F '\t' '$1 == "G" { count++ } END { print count + 0 }' "$entries_file")"
+    printf 'Managed differences:      %s\n' "$difference_count"
+    printf 'Source-only files:        %s\n' "$source_only_count"
+    printf 'Live-only files:          %s\n' "$live_only_count"
+    printf 'Generated exceptions:     %s\n' "$generated_count"
+    if [[ -s "$entries_file" ]]; then
+        printf '\nFile markers: D = different, S = source-only, L = live-only, G = generated, N = recursive\n'
+        sed 's/\t/  /' "$entries_file"
+    else
+        printf '\nNo source/live differences.\n'
+    fi
+    rm -f -- "$entries_file"
+}
+
+nvim_diff_file() {
+    local path="$1"
+    local temporary_root left_file right_file
+    temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/end4-nvim-diff.XXXXXX")"
+    left_file="$temporary_root/source/$path"
+    right_file="$temporary_root/live/$path"
+    mkdir -p "$(dirname "$left_file")" "$(dirname "$right_file")"
+
+    if [[ -f "$nvim_source_root/$path" ]]; then
+        cp -p "$nvim_source_root/$path" "$left_file"
+    else
+        printf '[source: file is absent]\n' > "$left_file"
+    fi
+    if [[ -f "$nvim_live_root/$path" ]]; then
+        cp -p "$nvim_live_root/$path" "$right_file"
+    else
+        printf '[live: file is absent]\n' > "$right_file"
+    fi
+
+    printf '\nNeovim diff: %s\n  left  = repository source\n  right = live configuration\n' "$path"
+    if command -v nvim >/dev/null 2>&1; then
+        nvim -d "$left_file" "$right_file" || true
+    elif command -v vimdiff >/dev/null 2>&1; then
+        vimdiff "$left_file" "$right_file" || true
+    else
+        diff -u "$left_file" "$right_file" || true
+    fi
+    rm -rf -- "$temporary_root"
+}
+
+nvim_diff_report() {
+    local entries_file selected_files path marker
+    [[ -d "$nvim_source_root" ]] || die 'repository Neovim tree is not present'
+    [[ -d "$nvim_live_root" ]] || die 'live Neovim tree is not present'
+    entries_file="$(mktemp "${TMPDIR:-/tmp}/end4-nvim-diff-files.XXXXXX")"
+    nvim_compare_entries "$nvim_source_root" "$nvim_live_root" "$entries_file"
+
+    if [[ ! -s "$entries_file" ]]; then
+        printf 'Neovim source and live configuration are identical.\n'
+        rm -f -- "$entries_file"
+        return 0
+    fi
+
+    printf 'Neovim source/live differences:\n'
+    sed 's/\t/  /' "$entries_file"
+    if has_interactive_tty && command -v fzf >/dev/null 2>&1 && command -v nvim >/dev/null 2>&1; then
+        printf '\nSelect files to open in a syntax-aware two-pane diff.\n'
+        selected_files="$(fzf --multi --height=80% --layout=reverse --border \
+            --prompt='nvim files > ' \
+            --header='D = different; S = source-only; L = live-only; G = generated. Enter opens selected files.' \
+            < "$entries_file")" || true
+        if [[ -n "$selected_files" ]]; then
+            while IFS=$'\t' read -r marker path; do
+                [[ -n "$path" ]] || continue
+                nvim_diff_file "$path"
+            done <<< "$selected_files"
+        fi
+    fi
+    rm -f -- "$entries_file"
+}
+
+create_nvim_stage() {
+    local live_generated="$nvim_live_root/lua/config/dynamic_colors.lua"
+    nvim_stage_dir="$(mktemp -d "${TMPDIR:-/tmp}/end4-nvim-stage.XXXXXX")"
+    rsync -a --delete "$nvim_source_root/" "$nvim_stage_dir/"
+    if [[ -f "$live_generated" ]]; then
+        mkdir -p "$nvim_stage_dir/lua/config"
+        cp -p "$live_generated" "$nvim_stage_dir/lua/config/dynamic_colors.lua"
+    fi
+}
+
+create_nvim_import_stage() {
+    local source_generated="$nvim_source_root/lua/config/dynamic_colors.lua"
+    local staged_generated
+    nvim_stage_dir="$(mktemp -d "${TMPDIR:-/tmp}/end4-nvim-import.XXXXXX")"
+    if [[ -d "$nvim_source_root" ]]; then
+        rsync -a "$nvim_source_root/" "$nvim_stage_dir/"
+    fi
+    rsync -a \
+        --exclude='.backup-themes/' \
+        --exclude='/nvim.log' \
+        --exclude='/Untitled' \
+        --exclude='/lua/lua/***' \
+        "$nvim_live_root/" "$nvim_stage_dir/"
+    staged_generated="$nvim_stage_dir/lua/config/dynamic_colors.lua"
+    if [[ -f "$source_generated" ]]; then
+        mkdir -p "$(dirname "$staged_generated")"
+        cp -p "$source_generated" "$staged_generated"
+    else
+        rm -f -- "$staged_generated"
+    fi
+    if nvim_tree_has_recursive_lua "$nvim_stage_dir"; then
+        rm -rf -- "$nvim_stage_dir"
+        die 'live import contains recursive lua/lua directories; the recursive tree was not imported'
+    fi
+}
+
+cleanup_nvim_stage() {
+    if [[ -n "${nvim_stage_dir:-}" && -d "$nvim_stage_dir" ]]; then
+        rm -rf -- "$nvim_stage_dir"
+    fi
+    nvim_stage_dir=''
+}
+
+run_nvim_health() {
+    local tree="$1"
+    local health_root health_log health_status config_parent
+    [[ -d "$tree" ]] || die "Neovim health target is missing: $tree"
+    command -v nvim >/dev/null 2>&1 || die 'Neovim is required for the Neovim health check'
+    [[ -f "$repo_root/tools/end4-nvim-health.lua" ]] || die 'Neovim health script is missing from the repository'
+
+    health_root="$(mktemp -d "${TMPDIR:-/tmp}/end4-nvim-health.XXXXXX")"
+    health_log="$health_root/nvim.log"
+    config_parent="$(dirname "$tree")"
+    health_status=0
+    END4_NVIM_CONFIG="$tree" \
+        END4_NVIM_HEALTH_SCRIPT="$repo_root/tools/end4-nvim-health.lua" \
+        XDG_CONFIG_HOME="$config_parent" \
+        XDG_CACHE_HOME="$health_root/cache" \
+        XDG_STATE_HOME="$health_root/state" \
+        XDG_DATA_HOME="$data_root" \
+        NVIM_LOG_FILE="$health_log" \
+        timeout 35s nvim --headless -u "$tree/init.lua" \
+            -c 'lua dofile(vim.env.END4_NVIM_HEALTH_SCRIPT)' >"$health_root/output" 2>&1 || health_status=$?
+    cat "$health_root/output"
+    if [[ "$health_status" -ne 0 ]]; then
+        printf 'end4: Neovim health failed; diagnostic log: %s\n' "$health_log" >&2
+        rm -rf -- "$health_root"
+        return 1
+    fi
+    rm -rf -- "$health_root"
+}
+
+archive_live_nvim() {
+    local stamp backup_root archive
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    backup_root="$state_root/end4/backups/nvim/$stamp"
+    mkdir -p "$backup_root"
+    archive="$backup_root/config.tar.gz"
+    if [[ -d "$nvim_live_root" ]]; then
+        tar -czf "$archive" -C "$config_root" nvim
+    else
+        tar -czf "$archive" --files-from=/dev/null
+    fi
+    sha256sum "$archive" > "$backup_root/SHA256SUMS"
+    printf '%s\n' "$backup_root"
+}
+
+nvim_process_running() {
+    command -v pgrep >/dev/null 2>&1 || return 1
+    pgrep -u "$(id -u)" -x nvim >/dev/null 2>&1
+}
+
+replace_nvim_tree() {
+    local replacement_tree="$1"
+    local allow_recursive="${2:-false}"
+    local backup_root staging old_tree stamp health_status
+    validate_nvim_tree "$replacement_tree" 'replacement Neovim tree' false "$allow_recursive"
+    if nvim_process_running; then
+        die 'Neovim is running; close all Neovim processes before replacing its configuration'
+    fi
+
+    backup_root="$(archive_live_nvim)"
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    staging="$(mktemp -d "$config_root/.end4-nvim-stage.XXXXXX")"
+    old_tree="$config_root/.nvim.end4-old.$stamp"
+    rsync -a --delete "$replacement_tree/" "$staging/"
+
+    if [[ -e "$nvim_live_root" || -L "$nvim_live_root" ]]; then
+        mv -- "$nvim_live_root" "$old_tree"
+    fi
+    mv -- "$staging" "$nvim_live_root"
+
+    health_status=0
+    run_nvim_health "$nvim_live_root" || health_status=$?
+    if [[ "$health_status" -ne 0 ]]; then
+        rm -rf -- "$nvim_live_root"
+        if [[ -e "$old_tree" || -L "$old_tree" ]]; then
+            mv -- "$old_tree" "$nvim_live_root"
+        fi
+        printf 'end4: Neovim deployment rolled back. Archive retained at %s\n' "$backup_root" >&2
+        return "$health_status"
+    fi
+
+    rm -rf -- "$old_tree"
+    printf 'Neovim deployment complete; rollback archive: %s\n' "$backup_root"
+}
+
+preview_nvim_deployment() {
+    local comparison_target temporary_target
+    [[ -d "$nvim_source_root" ]] || return 0
+    validate_nvim_tree "$nvim_source_root" 'repository Neovim tree' true
+    create_nvim_stage
+    comparison_target="$nvim_live_root"
+    temporary_target=''
+    if [[ ! -d "$comparison_target" ]]; then
+        temporary_target="$(mktemp -d "${TMPDIR:-/tmp}/end4-nvim-preview.XXXXXX")"
+        comparison_target="$temporary_target"
+        printf '\ncreate %s (repo-owned Neovim tree)\n' "$nvim_live_root"
+    fi
+    printf '\n%s -> %s (repo-owned replacement; live backup created on apply)\n' "$nvim_source_root" "$nvim_live_root"
+    rsync -ani --checksum --no-times --delete "$nvim_stage_dir/" "$comparison_target/" || true
+    if nvim_tree_has_recursive_lua "$nvim_live_root"; then
+        printf 'warning: recursive live lua directories will be removed by this replacement\n'
+    fi
+    [[ -n "$temporary_target" ]] && rmdir -- "$temporary_target"
+    cleanup_nvim_stage
+}
+
+nvim_import() {
+    local entries_file raw_entries
+    require_repo
+    require_no_merge
+    [[ -d "$nvim_live_root" ]] || die 'live Neovim tree is not present'
+    create_nvim_import_stage
+    entries_file="$(mktemp "${TMPDIR:-/tmp}/end4-nvim-import-files.XXXXXX")"
+    raw_entries="$(mktemp "${TMPDIR:-/tmp}/end4-nvim-import-raw.XXXXXX")"
+    nvim_compare_entries "$nvim_source_root" "$nvim_stage_dir" "$raw_entries"
+    awk -F '\t' '$1 != "G"' "$raw_entries" > "$entries_file"
+    rm -f -- "$raw_entries"
+
+    if [[ ! -s "$entries_file" ]]; then
+        printf 'Live Neovim configuration is already represented in the repository.\n'
+        rm -f -- "$entries_file"
+        cleanup_nvim_stage
+        return 0
+    fi
+
+    printf 'The following Neovim files would be imported from live state:\n'
+    sed 's/\t/  /' "$entries_file"
+    if ! confirm_action 'Adopt the live Neovim snapshot into the repository?'; then
+        printf 'Neovim import cancelled.\n'
+        rm -f -- "$entries_file"
+        cleanup_nvim_stage
+        return 0
+    fi
+
+    rsync -a --delete "$nvim_stage_dir/" "$nvim_source_root/"
+    validate_nvim_tree "$nvim_source_root" 'repository Neovim tree' true
+    rm -f -- "$entries_file"
+    cleanup_nvim_stage
+    printf 'Live Neovim configuration imported. Review and commit the repository changes.\n'
+}
+
+nvim_sync() {
+    local sync_root sync_status config_parent
+    validate_nvim_tree "$nvim_source_root" 'repository Neovim tree' true
+    command -v nvim >/dev/null 2>&1 || die 'Neovim is required for plugin synchronization'
+    [[ -f "$repo_root/tools/end4-nvim-sync.lua" ]] || die 'Neovim sync script is missing from the repository'
+
+    sync_root="$(mktemp -d "${TMPDIR:-/tmp}/end4-nvim-sync.XXXXXX")"
+    config_parent="$(dirname "$nvim_source_root")"
+    sync_status=0
+    END4_NVIM_CONFIG="$nvim_source_root" \
+        END4_NVIM_SYNC_SCRIPT="$repo_root/tools/end4-nvim-sync.lua" \
+        XDG_CONFIG_HOME="$config_parent" \
+        XDG_CACHE_HOME="$sync_root/cache" \
+        XDG_STATE_HOME="$sync_root/state" \
+        XDG_DATA_HOME="$data_root" \
+        timeout 20s nvim --headless -u NONE \
+            -c 'lua dofile(vim.env.END4_NVIM_CONFIG .. "/init.lua")' \
+            -c 'lua dofile(vim.env.END4_NVIM_SYNC_SCRIPT)' >"$sync_root/output" 2>&1 || sync_status=$?
+    cat "$sync_root/output"
+    rm -rf -- "$sync_root"
+    [[ "$sync_status" -eq 0 ]] || die 'Neovim plugin synchronization failed'
+}
+
+resolve_nvim_backup() {
+    local requested="${1:-}"
+    local backup_root="$state_root/end4/backups/nvim"
+    local candidate
+
+    if [[ -n "$requested" ]]; then
+        if [[ "$requested" == /* ]]; then
+            candidate="$requested"
+        else
+            candidate="$backup_root/$requested"
+        fi
+    else
+        candidate="$(find "$backup_root" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort | tail -1)"
+    fi
+
+    [[ -n "$candidate" && -f "$candidate/config.tar.gz" ]] || die 'no Neovim backup archive was found'
+    printf '%s\n' "$candidate"
+}
+
+nvim_rollback() {
+    local backup_dir="${1:-}"
+    local extract_root
+    backup_dir="$(resolve_nvim_backup "$backup_dir")"
+    printf 'Selected Neovim backup: %s\n' "$backup_dir"
+    if ! confirm_action 'Restore this archived Neovim configuration?'; then
+        printf 'Neovim rollback cancelled.\n'
+        return 0
+    fi
+
+    extract_root="$(mktemp -d "${TMPDIR:-/tmp}/end4-nvim-rollback.XXXXXX")"
+    tar -xzf "$backup_dir/config.tar.gz" -C "$extract_root"
+    [[ -d "$extract_root/nvim" ]] || {
+        rm -rf -- "$extract_root"
+        die 'backup archive does not contain a Neovim configuration'
+    }
+    replace_nvim_tree "$extract_root/nvim" true
+    rm -rf -- "$extract_root"
+}
+
+nvim_check() {
+    validate_nvim_tree "$nvim_source_root" 'repository Neovim tree' true
+    check_nvim_dependencies "$nvim_source_root" || die 'Neovim plugin dependencies are not synchronized'
+    run_nvim_health "$nvim_source_root"
+}
+
 for_each_upstream_misc() {
     local source_entry source_name
     shopt -s nullglob
@@ -611,7 +1076,8 @@ preview_upstream_files() {
 
 preview_local_overlay() {
     if [[ -d "$repo_root/local/.config" ]]; then
-        preview_dir keep "$repo_root/local/.config" "$config_root"
+        preview_dir keep "$repo_root/local/.config" "$config_root" --exclude=/nvim
+        preview_nvim_deployment
     fi
     if [[ -d "$repo_root/local/.local" ]]; then
         preview_dir keep "$repo_root/local/.local" "$user_home/.local"
@@ -623,7 +1089,7 @@ preview_device_overlay() {
     [[ -n "$selected_device" ]] || return 0
     local device_config="$repo_root/devices/$selected_device/.config"
     [[ -d "$device_config" ]] || die "device overlay not found: devices/$selected_device/.config"
-    preview_dir keep "$device_config" "$config_root"
+    preview_dir keep "$device_config" "$config_root" --exclude=/nvim
 }
 
 preview_deployment() {
@@ -663,7 +1129,12 @@ sync_upstream_files() {
 
 apply_local_overlay() {
     if [[ -d "$repo_root/local/.config" ]]; then
-        sync_dir keep "$repo_root/local/.config" "$config_root"
+        sync_dir keep "$repo_root/local/.config" "$config_root" --exclude=/nvim
+        if [[ -d "$nvim_source_root" ]]; then
+            create_nvim_stage
+            replace_nvim_tree "$nvim_stage_dir"
+            cleanup_nvim_stage
+        fi
     fi
     if [[ -d "$repo_root/local/.local" ]]; then
         sync_dir keep "$repo_root/local/.local" "$user_home/.local"
@@ -675,7 +1146,7 @@ apply_device_overlay() {
     [[ -n "$selected_device" ]] || return 0
     local device_config="$repo_root/devices/$selected_device/.config"
     [[ -d "$device_config" ]] || die "device overlay not found: devices/$selected_device/.config"
-    sync_dir keep "$device_config" "$config_root"
+    sync_dir keep "$device_config" "$config_root" --exclude=/nvim
 }
 
 run_deployment() {
@@ -760,6 +1231,10 @@ run_checks() {
     run_lua_checks || check_failed=1
     run_python_checks || check_failed=1
     run_qml_checks || check_failed=1
+    if [[ -d "$nvim_source_root" ]]; then
+        check_nvim_dependencies "$nvim_source_root" || check_failed=1
+        run_nvim_health "$nvim_source_root" || check_failed=1
+    fi
     if [[ "$check_failed" -ne 0 ]]; then
         printf 'end4: one or more checks failed\n' >&2
         return 1
@@ -901,6 +1376,55 @@ if [[ "$command_name" == system ]]; then
 fi
 
 case "$command_name" in
+    nvim)
+        nvim_subcommand="${1:-status}"
+        shift || true
+        case "$nvim_subcommand" in
+            status)
+                [[ $# -eq 0 ]] || die "unknown nvim status option: $1"
+                nvim_status_report
+                ;;
+            diff|compare)
+                [[ $# -eq 0 ]] || die "unknown nvim diff option: $1"
+                nvim_diff_report
+                ;;
+            check)
+                [[ $# -eq 0 ]] || die "unknown nvim check option: $1"
+                nvim_check
+                ;;
+            import)
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --yes) assume_yes=true; shift ;;
+                        -h|--help) usage; exit 0 ;;
+                        *) die "unknown nvim import option: $1" ;;
+                    esac
+                done
+                nvim_import
+                ;;
+            sync)
+                [[ $# -eq 0 ]] || die "unknown nvim sync option: $1"
+                nvim_sync
+                ;;
+            rollback)
+                nvim_backup=''
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --yes) assume_yes=true; shift ;;
+                        -h|--help) usage; exit 0 ;;
+                        *)
+                            [[ -z "$nvim_backup" ]] || die 'nvim rollback accepts only one backup path'
+                            nvim_backup="$1"
+                            shift
+                            ;;
+                    esac
+                done
+                nvim_rollback "$nvim_backup"
+                ;;
+            -h|--help) usage; exit 0 ;;
+            *) die "unknown nvim subcommand: $nvim_subcommand" ;;
+        esac
+        ;;
     status|report)
         require_repo
         print_git_status

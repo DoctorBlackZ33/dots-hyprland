@@ -10,6 +10,9 @@ setup() {
 
     cp "$BATS_TEST_DIRNAME/../end4" "$repo/end4"
     chmod +x "$repo/end4"
+    mkdir -p "$repo/tools"
+    cp "$BATS_TEST_DIRNAME/../tools/end4-nvim-health.lua" "$repo/tools/"
+    cp "$BATS_TEST_DIRNAME/../tools/end4-nvim-sync.lua" "$repo/tools/"
     mkdir -p \
         "$repo/dots/.config/hypr/hyprland" \
         "$repo/dots/.config/hypr/custom" \
@@ -66,6 +69,32 @@ make_upstream_commit() {
     git -C "$updater" add "$file"
     git -C "$updater" commit -qm "$message"
     git -C "$updater" push -q origin main
+}
+
+make_nvim_source_fixture() {
+    mkdir -p \
+        "$repo/local/.config/nvim/lua/config" \
+        "$repo/local/.config/nvim/lua/plugins"
+    printf 'require("config.lazy")\n' > "$repo/local/.config/nvim/init.lua"
+    printf '{}\n' > "$repo/local/.config/nvim/lazy-lock.json"
+    printf 'return {}\n' > "$repo/local/.config/nvim/lua/codex.lua"
+    printf 'return {}\n' > "$repo/local/.config/nvim/lua/plugins/codex.lua"
+    printf 'return {}\n' > "$repo/local/.config/nvim/lua/config/lazy.lua"
+    printf 'owner=end4_custom\nschema=1\nmode=complete\n' > "$repo/local/.config/nvim/.end4-managed"
+    printf '1.4.0\n' > "$repo/local/.config/nvim/codex-acp.version"
+}
+
+run_end4_with_path() {
+    local prefix="$1"
+    shift
+    env \
+        PATH="$prefix:$PATH" \
+        END4_REPO_ROOT="$repo" \
+        HOME="$home" \
+        XDG_CONFIG_HOME="$home/config" \
+        XDG_DATA_HOME="$home/data" \
+        END4_FROM_LAZYGIT=1 \
+        "$repo/end4" "$@"
 }
 
 @test "merge reports no work when upstream has no incoming commits" {
@@ -211,6 +240,72 @@ make_upstream_commit() {
     run run_end4 update --general --prune --yes
     [ "$status" -eq 0 ]
     [ ! -e "$home/config/quickshell/live-only.conf" ]
+}
+
+@test "nvim status identifies recursive live trees and ignores runtime artifacts" {
+    make_nvim_source_fixture
+    mkdir -p "$home/config/nvim/lua/lua/config" "$home/config/nvim/.backup-themes"
+    printf 'recursive\n' > "$home/config/nvim/lua/lua/config/old.lua"
+    printf 'log\n' > "$home/config/nvim/nvim.log"
+    printf 'backup\n' > "$home/config/nvim/.backup-themes/old.lua"
+
+    run run_end4 nvim status
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Recursive Lua trees:"*"cleanup required"* ]]
+    [[ "$output" == *"N  lua/lua/config/old.lua"* ]]
+    [[ "$output" != *"nvim.log"* ]]
+    [[ "$output" != *".backup-themes"* ]]
+}
+
+@test "nvim import adopts live files without recursive copying" {
+    make_nvim_source_fixture
+    mkdir -p "$home/config/nvim/lua/config"
+    cp -a "$repo/local/.config/nvim/." "$home/config/nvim/"
+    printf 'live-only\n' > "$home/config/nvim/lua/config/live.lua"
+
+    run run_end4 nvim import --yes
+
+    [ "$status" -eq 0 ]
+    [ -e "$repo/local/.config/nvim/lua/config/live.lua" ]
+    [ ! -e "$repo/local/.config/nvim/lua/lua" ]
+}
+
+@test "nvim deployment replaces the live tree and creates a rollback archive" {
+    make_nvim_source_fixture
+    git -C "$repo" add local/.config/nvim
+    git -C "$repo" commit -qm 'fixture complete nvim config'
+    mkdir -p "$home/config/nvim"
+    cp -a "$repo/local/.config/nvim/." "$home/config/nvim/"
+    mkdir -p "$home/config/nvim/lua/lua/config"
+    printf 'stale recursive file\n' > "$home/config/nvim/lua/lua/config/stale.lua"
+    fake_bin="$test_root/fake-bin"
+    mkdir -p "$fake_bin"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$fake_bin/nvim"
+    chmod +x "$fake_bin/nvim"
+
+    run run_end4_with_path "$fake_bin" update --general --yes
+
+    [ "$status" -eq 0 ]
+    [ -e "$home/config/nvim/init.lua" ]
+    [ -e "$home/config/nvim/.end4-managed" ]
+    [ ! -e "$home/config/nvim/lua/lua" ]
+    [ -n "$(find "$home/.local/state/end4/backups/nvim" -name config.tar.gz -print -quit)" ]
+    [[ "$output" == *"rollback archive"* ]]
+
+    run run_end4_with_path "$fake_bin" nvim rollback --yes
+
+    [ "$status" -eq 0 ]
+    [ -e "$home/config/nvim/lua/lua/config/stale.lua" ]
+}
+
+@test "nvim check refuses an incomplete repository tree" {
+    mkdir -p "$repo/local/.config/nvim/lua/config"
+
+    run run_end4 nvim check
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"repository Neovim tree is incomplete; missing init.lua"* ]]
 }
 
 @test "system wrapper honors an alternate repository root" {
