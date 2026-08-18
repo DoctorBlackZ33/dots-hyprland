@@ -91,10 +91,25 @@ Overseer tasks whose output and status can be revisited there.
 ## Codex, key groups, and Yazi
 
 Codex is available under the `<leader>z` Which-key group:
-`<leader>zc` opens chat, `<leader>za` asks about the current file or selection,
-`<leader>zf` runs a reviewed quick fix, `<leader>zr` opens the research
-workspace, and `<leader>zR` previews the research report. The direct commands
-`:CodexChat`, `:CodexAsk`, and `:CodexFix` are also available.
+`<leader>zc` reopens the agent chat, `<leader>zC` creates a new agent chat,
+`<leader>za` asks about the current file or selection, and `<leader>zf` runs a
+reviewed quick fix. `<leader>zs` opens read-only research, `<leader>zS`
+previews its Markdown/Mermaid report, and `<leader>zr` opens the Codex session
+picker. Research, chat, and agent sessions can remain open independently and
+are saved under Neovim state storage when Neovim exits.
+
+The direct commands are `:CodexChat`, `:CodexChatNew`, `:CodexAsk`,
+`:CodexFix`, `:CodexResearch`, `:CodexResearchNew`, `:CodexResearchPreview`,
+`:CodexSessions`, `:CodexHide`, and `:CodexChanges`.
+
+Model defaults are configurable before CodeCompanion loads:
+
+    vim.g.codex_model_defaults = {
+      ask = { model = "gpt-5.6-luna", reasoning_effort = "high" },
+      fix = { model = "gpt-5.6-luna", reasoning_effort = "high" },
+      agent = { model = "gpt-5.6-luna", reasoning_effort = "max" },
+      research = { model = "gpt-5.6-luna", reasoning_effort = "max" },
+    }
 
 Which-key labels and icons are registered for Actions (`<leader>a`), IDE
 (`i`), Java (`j`), Kubernetes (`k`), Overseer (`o`), Remote (`r`), and YAML

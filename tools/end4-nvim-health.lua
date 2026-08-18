@@ -22,9 +22,16 @@ local function command_exists(name)
   return vim.fn.exists(":" .. name) == 2
 end
 
+local function mapping(mode, lhs)
+  return vim.fn.maparg(lhs, mode, false, true)
+end
+
 vim.defer_fn(function()
-  check("codex module", function()
-    assert(type(require("codex")) == "table")
+  local codex = check("codex module", function()
+    local module = require("codex")
+    assert(type(module) == "table")
+    assert(type(module.model_defaults) == "table")
+    return module
   end)
 
   check("codecompanion module", function()
@@ -34,10 +41,17 @@ vim.defer_fn(function()
   check("Codex commands", function()
     for _, name in ipairs({
       "CodexChat",
+      "CodexChatNew",
       "CodexAsk",
       "CodexFix",
       "CodexResearch",
+      "CodexResearchNew",
       "CodexResearchPreview",
+      "CodexResearchStop",
+      "CodexSessions",
+      "CodexSessionPicker",
+      "CodexHide",
+      "CodexChanges",
     }) do
       assert(command_exists(name), "missing :" .. name)
     end
@@ -48,19 +62,27 @@ vim.defer_fn(function()
   end)
 
   check("Codex keymaps", function()
-    for _, mapping in ipairs({
+    for _, expected in ipairs({
       { mode = "n", lhs = "<leader>zc", desc = "Codex Chat" },
+      { mode = "n", lhs = "<leader>zC", desc = "New Codex Chat" },
       { mode = "n", lhs = "<leader>za", desc = "Codex Ask" },
       { mode = "n", lhs = "<leader>zf", desc = "Codex Quick Fix" },
-      { mode = "n", lhs = "<leader>zr", desc = "Codex Research" },
-      { mode = "n", lhs = "<leader>zR", desc = "Preview Codex Research" },
+      { mode = "n", lhs = "<leader>zs", desc = "Codex Research" },
+      { mode = "n", lhs = "<leader>zS", desc = "Preview Codex Research" },
+      { mode = "n", lhs = "<leader>zr", desc = "Codex Session Picker" },
       { mode = "v", lhs = "<leader>za", desc = "Codex Ask Selection" },
       { mode = "v", lhs = "<leader>zf", desc = "Codex Fix Selection" },
     }) do
-      local keymap = vim.fn.maparg(mapping.lhs, mapping.mode, false, true)
-      assert(type(keymap) == "table" and keymap.lhs ~= "", "missing " .. mapping.mode .. " " .. mapping.lhs)
-      assert(keymap.desc == mapping.desc, "unexpected description for " .. mapping.lhs)
+      local keymap = mapping(expected.mode, expected.lhs)
+      assert(type(keymap) == "table" and keymap.lhs ~= "", "missing " .. expected.mode .. " " .. expected.lhs)
+      assert(keymap.desc == expected.desc, "unexpected description for " .. expected.lhs)
     end
+
+    local stale = mapping("n", "<leader>zR")
+    assert(
+      not stale.lhs or stale.desc ~= "Preview Codex Research",
+      "stale <leader>zR Codex mapping is still installed"
+    )
   end)
 
   check("Codex executable", function()
@@ -69,12 +91,41 @@ vim.defer_fn(function()
     assert(vim.fn.executable(path) == 1, "Codex executable is not executable: " .. path)
   end)
 
-  check("Codex adapter", function()
-    local codex = require("codex")
+  check("Codex adapters and model settings", function()
+    assert(codex, "Codex module was not loaded")
     local options = codex.codecompanion_opts()
     assert(options.adapters and options.adapters.acp, "ACP adapters are missing")
-    assert(type(options.adapters.acp.codex) == "function", "Codex ACP adapter is missing")
-    assert(options.adapters.acp.codex() ~= nil, "Codex ACP adapter could not be constructed")
+
+    for _, name in ipairs({ "codex", "codex_ask", "codex_fix", "codex_research" }) do
+      assert(type(options.adapters.acp[name]) == "function", "missing ACP adapter: " .. name)
+      local adapter = options.adapters.acp[name]()
+      assert(adapter ~= nil, "could not construct ACP adapter: " .. name)
+      assert(
+        adapter.defaults
+          and adapter.defaults.session_config_options
+          and adapter.defaults.session_config_options.model,
+        "missing model defaults for " .. name
+      )
+      assert(
+        adapter.defaults.session_config_options.thought_level,
+        "missing reasoning level for " .. name
+      )
+    end
+
+    for _, kind in ipairs({ "agent", "ask", "fix", "research" }) do
+      local defaults = codex.model_defaults[kind]
+      assert(defaults and defaults.model and defaults.reasoning_effort, "incomplete " .. kind .. " model defaults")
+    end
+  end)
+
+  check("Chat buffer behavior", function()
+    local options = codex.codecompanion_opts()
+    local chat = options.interactions.chat
+    assert(chat.adapter == "codex", "Codex is not the default chat adapter")
+    assert(chat.opts.completion_provider == "default", "chat completion is not on-demand")
+    assert(chat.keymaps.close == false, "chat close mapping was not disabled")
+    assert(chat.keymaps.copilot_stats == false, "Copilot statistics mapping is still enabled")
+    assert(options.display.chat.start_in_insert_mode == false, "chat starts in insert mode")
   end)
 
   if failures > 0 then
