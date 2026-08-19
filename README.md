@@ -129,6 +129,349 @@ development actions only make sense while a development session is active;
 the script refuses unsafe combinations such as updating main behind an
 attached feature worktree.
 
+## LazyGit in practice: how the TUI actually works
+
+The repository LazyGit configuration has one custom global key: Ctrl-G. Ctrl-G
+opens a second menu containing the end-4 commands. It does not replace normal
+LazyGit Git operations.
+
+The custom commands use output: terminal. Technically, LazyGit suspends its
+screen, runs end4 with a real terminal so it can ask questions, and returns to
+LazyGit when the command exits. In plain language, Ctrl-G actions are normal
+interactive commands temporarily launched from inside LazyGit.
+
+The environment flag END4_FROM_LAZYGIT=1 tells end4 that LazyGit is already open.
+That prevents the merge/review commands from trying to open a second LazyGit
+inside the first one.
+
+### Main checkout versus development worktree
+
+This distinction is essential when committing live configuration.
+
+system tui opens the stable main checkout:
+
+~~~text
+/home/black/end4_custom
+~~~
+
+When a development session is active, the changed live files belong to the
+separate feature worktree, not to main. Main can correctly show no changes while
+the live experiment has many changes.
+
+To commit live development changes in LazyGit:
+
+~~~bash
+system dev status
+~~~
+
+Copy the Worktree path printed by that command, then open that exact path:
+
+~~~bash
+lazygit --path "/path/printed-by-system-dev-status" \
+  --use-config-file /home/black/end4_custom/local/.config/lazygit/config.yml
+~~~
+
+This LazyGit instance is looking at the feature branch that the live files are
+linked to. Do not use system tui for this commit; system tui intentionally opens
+main.
+
+The Ctrl-G development actions still work from the feature-worktree LazyGit
+instance:
+
+- s shows the active development session;
+- f refreshes the live link map;
+- c captures live-only files;
+- h reloads Hyprland and Quickshell;
+- x restores the stable managed live files;
+- k keeps the tested files deployed.
+
+The l, r, m, u, and d custom actions invoke the main end4 repository and are
+not the way to commit the feature worktree. Ordinary update/merge/discard
+operations are also blocked while development is active.
+
+### The normal Git actions inside LazyGit
+
+These are the actions used to commit a live configuration change:
+
+1. Open the feature worktree LazyGit as shown above.
+2. Press 2 to focus the Files panel. Press ? if the installed LazyGit version
+   shows a different panel layout.
+3. Move to a file with the arrow keys or j/k.
+4. Press Space to stage or unstage the selected file.
+5. Press Enter on a file to inspect its diff and stage individual hunks or
+   lines. Space stages the selected hunk/line; Esc returns to the file list.
+6. Press a in the Files panel to stage all files when that is intentional.
+7. Press c in the Files panel to commit the staged files.
+8. Type a commit message and press Enter to confirm. If LazyGit opens an
+   external editor, save the message and exit that editor.
+9. Press 4 to inspect the resulting commit in the Commits panel.
+10. Press P only when you intentionally want to push the feature branch.
+
+Plain-language version: select the files that belong together, press Space to
+put them in the next commit, press c, write what changed, and press Enter.
+Nothing is committed merely because a file changed on the live system.
+
+Useful standard LazyGit keys:
+
+| Key | Where/when | What it does |
+| --- | --- | --- |
+| 1 | Anywhere | Focus the Status panel |
+| 2 | Anywhere | Focus the Files panel |
+| 3 | Anywhere | Focus branches/remotes/tags |
+| 4 | Anywhere | Focus commits/reflog |
+| 5 | Anywhere | Focus stash |
+| j/k or arrows | List panels | Move the selection |
+| Enter | Files panel | Open the diff/staging view; on a commit, view its files |
+| Space | Files/staging view | Stage or unstage a file, hunk, or line |
+| a | Files panel | Stage or unstage all files |
+| c | Files panel | Commit staged changes |
+| P | Global | Push the current branch |
+| p | Global | Pull the current branch |
+| f | Files panel | Fetch remote changes |
+| R | Global | Refresh LazyGit's Git state; it does not fetch |
+| W | Global | Open ref/diff comparison options |
+| : | Global | Run a shell command from the repository directory |
+| ? | Global | Show the installed LazyGit keybindings |
+| q | Global | Quit LazyGit |
+
+The installed version's ? help is authoritative if a future LazyGit release
+changes a key. The custom Ctrl-G menu is defined in
+local/.config/lazygit/config.yml.
+
+### TUI equivalent for starting and developing a branch
+
+The current custom menu does not have a dedicated start-branch key because
+starting requires a branch name and optional device. Use LazyGit's built-in
+shell bridge:
+
+1. Start with system tui on main.
+2. Press :.
+3. Type the development command, for example:
+
+~~~text
+system dev start panel-experiment --device DarkArch
+~~~
+
+4. Press Enter and answer any confirmation prompt.
+5. Quit that LazyGit instance with q.
+6. Copy the worktree path from system dev status and open it with the
+   lazygit --path command shown above.
+7. Edit ~/.config normally. The managed files are now links into the feature
+   worktree.
+8. Use Ctrl-G, then s/f/c/h as needed.
+9. Commit from the feature-worktree Files panel using Space and c.
+
+This is the TUI workflow in plain language: use LazyGit's : command once to
+start the special linked session, then use a LazyGit window opened on the
+feature branch to save the live edits as Git commits.
+
+### TUI equivalent for capturing active live changes
+
+With an active development session:
+
+1. Open the feature worktree in LazyGit.
+2. Press Ctrl-G, then c.
+3. Classify each candidate in the terminal prompt: a to adopt, i to ignore,
+   or l to leave it live-only.
+4. When the command returns, press R to refresh the Git view.
+5. Stage the adopted files with Space and commit with c.
+
+The terminal equivalent is system dev capture followed by git add and git
+commit. The TUI version uses the same capture helper, then uses LazyGit's
+Files panel for the actual commit.
+
+For Neovim changes outside a development session, press : in the main LazyGit
+window and run:
+
+~~~text
+system nvim import
+~~~
+
+There is no generic silent import of manually modified existing managed
+non-Neovim files. Use : to run system dev capture for live-only files, or
+copy an intentional edit into dots/ or local/ and then stage it in the
+appropriate LazyGit window.
+
+### TUI equivalent for reviewing and merging upstream
+
+Use the main-checkout LazyGit window for upstream integration:
+
+1. Press Ctrl-G, then r for the read-only three-way comparison.
+2. Exit the comparison and press Ctrl-G, then m.
+3. The m command fetches upstream and leaves a non-committing merge in the
+   main checkout. LazyGit stays the Git review interface.
+4. In the Files panel, select an unresolved file and press Enter.
+5. In the conflict view, use Space to pick a hunk, b to pick both hunks, e to
+   edit the complete file, or M for merge-conflict options.
+6. Move between conflicts with the arrow keys or h/l.
+7. Return to the Files panel, stage each resolved file with Space, and inspect
+   the staged diff with Enter.
+8. Run the checks from LazyGit by pressing : and entering system check.
+9. Commit the staged merge with c in the Files panel.
+10. Press Ctrl-G, then l, to inspect the resulting repository state.
+
+For a one-file choice, the TUI equivalent of keeping a side is the conflict
+options menu. The explicit shell fallback through : is:
+
+~~~text
+git restore --ours -- path/to/file
+git add path/to/file
+~~~
+
+or:
+
+~~~text
+git restore --theirs -- path/to/file
+git add path/to/file
+~~~
+
+Plain-language version: r lets you look, m starts the merge, Enter opens the
+problem file, Space/b/e lets you choose how to combine it, Space marks it
+resolved, and c saves the completed merge as a commit.
+
+### TUI equivalent for deploying the merged setup
+
+For the normal interactive deployment:
+
+1. In the main LazyGit window, press Ctrl-G, then u.
+2. The terminal preview shows the checks and deployment plan.
+3. Choose General or the device overlay when prompted.
+4. Read the preview and confirm.
+5. LazyGit resumes after deployment. Press R to refresh its Git state.
+
+For an explicit dry run or a named device, use LazyGit's : bridge instead:
+
+~~~text
+system update --dry-run --device DarkArch
+~~~
+
+When the preview is satisfactory, run the same command without --dry-run:
+
+~~~text
+system update --device DarkArch
+~~~
+
+The TUI option u is the same update operation, but it intentionally lets the
+script ask for the deployment target. The : bridge is the TUI equivalent for
+flags that are not represented by a dedicated menu key.
+
+### TUI equivalent for committing a pre-upstream checkpoint
+
+To make a Git backup before merging upstream:
+
+1. Open main with system tui.
+2. Press 2 for Files.
+3. Inspect files with Enter.
+4. Stage only intended files with Space or stage individual hunks/lines.
+5. Press c, enter a checkpoint message, and confirm.
+6. Press 4 for Commits, select the new checkpoint commit, and press T to create
+   a tag such as before-upstream-20260819T120000Z.
+7. Confirm the tag in the prompt.
+
+The terminal equivalent is git add -p, git commit, and git tag. The TUI version
+does the same operations without leaving LazyGit.
+
+If the current live configuration is in an active development session, commit
+the feature worktree first using the feature-worktree LazyGit window. Then
+press Ctrl-G, x to restore stable live files, return to main LazyGit, and use :
+to run:
+
+~~~text
+system dev integrate panel-experiment
+~~~
+
+Review and commit that prepared merge in the main LazyGit Files panel, then
+create the checkpoint tag from the resulting commit.
+
+### TUI equivalent for rollback
+
+If an upstream merge is still uncommitted:
+
+1. In main LazyGit, press Ctrl-G, then d.
+2. Read the warning in the terminal.
+3. Type DISCARD when requested.
+4. LazyGit returns with the merge aborted and the uncommitted main state cleaned.
+
+If a development experiment is active:
+
+1. Open either LazyGit window with the active session available.
+2. Press Ctrl-G, then x to restore the snapshotted managed live files, or k to
+   keep the tested files.
+3. Commit the feature branch later or leave it for another session.
+
+If a bad upstream merge was already committed, select that merge commit in the
+Commits panel (4) and press t to create a revert commit. For a merge commit
+where Git asks for the mainline parent, press : and run the explicit command:
+
+~~~text
+git revert -m 1 <merge-commit>
+~~~
+
+After the revert is committed, press Ctrl-G, u to deploy the reverted source,
+or use : for an explicit device/dry-run command.
+
+For Neovim, press : and run system nvim rollback. It presents the independent
+Neovim backup archives.
+
+### TUI equivalent for commands without a custom key
+
+The : key is the deliberate bridge between the TUI and the full command
+interface. Run these from the main LazyGit window unless noted otherwise:
+
+| Terminal command | LazyGit equivalent |
+| --- | --- |
+| system status | Ctrl-G, l |
+| system review | Ctrl-G, r |
+| system merge | Ctrl-G, m |
+| system update | Ctrl-G, u; this uses the interactive device selector |
+| system update --dry-run --general | Press :, type the command, Enter |
+| system dev start BRANCH --device NAME | Press :, type the command, Enter; then open the printed feature worktree in a second LazyGit instance |
+| system dev attach BRANCH or PATH | Press :, type the command, Enter; then open the attached worktree in LazyGit |
+| system dev status | Ctrl-G, s |
+| system dev refresh | Ctrl-G, f |
+| system dev capture | Ctrl-G, c |
+| system dev reload all | Ctrl-G, h |
+| system dev reload hypr or quickshell | Press :, type the scoped command, Enter |
+| system dev check | Press :, type system dev check, Enter |
+| system dev sync | Press :, type system dev sync, Enter |
+| system dev stop | Ctrl-G, x |
+| system dev stop --keep | Ctrl-G, k |
+| system dev integrate BRANCH | Press :, type system dev integrate BRANCH, Enter; review the prepared merge in main LazyGit |
+| system dev remove BRANCH | Press :, type system dev remove BRANCH, Enter |
+| system nvim status | Press :, type system nvim status, Enter |
+| system nvim diff | Press :, type system nvim diff, Enter |
+| system nvim check | Press :, type system nvim check, Enter |
+| system nvim import | Press :, type system nvim import, Enter |
+| system nvim deploy | Press :, type system nvim deploy, Enter |
+| system nvim sync | Press :, type system nvim sync, Enter |
+| system nvim rollback | Press :, type system nvim rollback, Enter |
+| system check | Press :, type system check, Enter |
+| system update --dry-run --device NAME | Press :, type the command, Enter |
+| system update --device NAME | Press :, type the command, Enter, or use Ctrl-G, u for the interactive target menu |
+| system update --prune --device NAME | Press :, type the command, Enter; read the deletion preview carefully |
+| system discard | Ctrl-G, d |
+| system bootstrap | Press :, type system bootstrap, Enter; this is not a normal update |
+| system apply OPTIONS | Press :, type the command, Enter; compatibility path only |
+| git tag | Commits panel (4), select commit, press T |
+| git revert | Commits panel (4), select commit, press t |
+| git push | Press P |
+| git pull | Press p |
+
+This table is intentional: custom keys cover the high-risk system actions, while
+the : bridge keeps every lower-level command available without pretending that
+all commands are native LazyGit panels.
+
+### Do not use the ordinary LazyGit worktree action for system development
+
+LazyGit's built-in w action can create a normal Git worktree. It does not run
+the end4 development lifecycle: it does not snapshot the live configuration,
+create the per-file links, preserve/classify live extras, or install the
+session guard.
+
+For system development, use : followed by system dev start. Use LazyGit's
+ordinary w only when you explicitly want an unrelated plain Git worktree.
+
+
 ## 5. The command-line equivalents
 
 The LazyGit menu is a convenient front end. These commands are useful when
