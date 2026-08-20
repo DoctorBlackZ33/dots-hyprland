@@ -33,7 +33,9 @@ if status is-interactive # Commands to run in interactive sessions can go here
     alias clear "printf '\033[2J\033[3J\033[1;1H'" # fix: kitty doesn't clear properly
     alias celar "printf '\033[2J\033[3J\033[1;1H'"
     alias claer "printf '\033[2J\033[3J\033[1;1H'"
-    alias ls 'eza --icons'
+    function ls --wraps eza --description 'alias ls=eza --icons'
+        eza $argv --icons
+    end
     alias pamcan pacman
     alias q 'qs -c ii'
     alias sbb sbb-tui
