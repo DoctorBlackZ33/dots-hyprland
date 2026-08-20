@@ -19,3 +19,8 @@ See `local/.local/bin/handy-launch` for the tiered selection it implements.
 ```bash
 system update --device DarkArch
 ```
+
+## Overlay contents
+
+- `.config/handy-launch.conf` — GPU tiering for `handy-launch` (SUPER+ALT+V
+  dictation): PCI ids, VRAM thresholds, busy limit.
