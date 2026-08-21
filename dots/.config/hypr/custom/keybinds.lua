@@ -18,17 +18,25 @@ local qsAlive = "qs -c " .. qsConfig .. " ipc call TEST_ALIVE"
 hl.unbind("SUPER + SHIFT + X")
 
 -- Primary: quickshell region selector -> paddle_ocr.sh (daemon) -> wl-copy
-hl.bind("SUPER + SHIFT + X", hl.dsp.global("quickshell:regionOcr"),
-    { description = "Utilities: Character recognition >> clipboard" })
+hl.bind(
+	"SUPER + SHIFT + X",
+	hl.dsp.global("quickshell:regionOcr"),
+	{ description = "Utilities: Character recognition >> clipboard" }
+)
 
 -- Fallback: when quickshell is down, region-select with slurp, OCR via daemon.
 -- Parentheses matter: `a || b && c` runs c when a succeeds, so the whole
 -- pipeline must sit behind the liveness check or wl-copy clobbers the
 -- clipboard with empty input on every OCR press.
-hl.bind("SUPER + SHIFT + X", hl.dsp.exec_cmd(
-    qsAlive .. " || ( pidof slurp || ( grim -g \"$(slurp $SLURP_ARGS)\" \"/tmp/ocr_image.png\" && " ..
-    qsScripts .. "/ocr/paddle_ocr.sh \"/tmp/ocr_image.png\" | wl-copy && rm \"/tmp/ocr_image.png\" ) )"
-))
+hl.bind(
+	"SUPER + SHIFT + X",
+	hl.dsp.exec_cmd(
+		qsAlive
+			.. ' || ( pidof slurp || ( grim -g "$(slurp $SLURP_ARGS)" "/tmp/ocr_image.png" && '
+			.. qsScripts
+			.. '/ocr/paddle_ocr.sh "/tmp/ocr_image.png" | wl-copy && rm "/tmp/ocr_image.png" ) )'
+	)
+)
 
 -- ===========================================================================
 -- VIM-STYLE NAVIGATION & WORKSPACE MANAGEMENT
@@ -42,51 +50,51 @@ hl.bind("SUPER + SHIFT + X", hl.dsp.exec_cmd(
 
 -- Cycle workspaces on current monitor (SUPER+[ / SUPER+])
 local function cycleWorkspaceOnMonitor(direction)
-    local activeWs = hl.get_active_workspace()
-    local currentId = activeWs.id
-    local monitorId = activeWs.monitor.id
+	local activeWs = hl.get_active_workspace()
+	local currentId = activeWs.id
+	local monitorId = activeWs.monitor.id
 
-    local allWs = hl.get_workspaces()
-    local monitorWs = {}
-    for _, ws in ipairs(allWs) do
-        local wid = ws.id
-        if ws.monitor.id == monitorId and type(wid) == "number" and wid > 0 then
-            table.insert(monitorWs, wid)
-        end
-    end
-    table.sort(monitorWs)
+	local allWs = hl.get_workspaces()
+	local monitorWs = {}
+	for _, ws in ipairs(allWs) do
+		local wid = ws.id
+		if ws.monitor.id == monitorId and type(wid) == "number" and wid > 0 then
+			table.insert(monitorWs, wid)
+		end
+	end
+	table.sort(monitorWs)
 
-    if #monitorWs == 0 then
-        return
-    end
+	if #monitorWs == 0 then
+		return
+	end
 
-    local idx = nil
-    for i, w in ipairs(monitorWs) do
-        if w == currentId then
-            idx = i
-            break
-        end
-    end
+	local idx = nil
+	for i, w in ipairs(monitorWs) do
+		if w == currentId then
+			idx = i
+			break
+		end
+	end
 
-    if idx == nil then
-        idx = 1
-    end
+	if idx == nil then
+		idx = 1
+	end
 
-    local nextIdx
-    if direction == "next" then
-        nextIdx = (idx % #monitorWs) + 1
-    else
-        nextIdx = ((idx - 2) % #monitorWs) + 1
-    end
+	local nextIdx
+	if direction == "next" then
+		nextIdx = (idx % #monitorWs) + 1
+	else
+		nextIdx = ((idx - 2) % #monitorWs) + 1
+	end
 
-    hl.dispatch(hl.dsp.focus({ workspace = tostring(monitorWs[nextIdx]) }))
+	hl.dispatch(hl.dsp.focus({ workspace = tostring(monitorWs[nextIdx]) }))
 end
 
 -- Move current workspace to a specific monitor by name
 local function moveWorkspaceToMonitor(monitorName)
-    if monitorName then
-        hl.dispatch(hl.dsp.workspace.move({ monitor = monitorName }))
-    end
+	if monitorName then
+		hl.dispatch(hl.dsp.workspace.move({ monitor = monitorName }))
+	end
 end
 
 -- ===========================================================================
@@ -101,9 +109,9 @@ hl.unbind("CTRL + SUPER + BracketRight")
 -- ===========================================================================
 -- UNBIND ORIGINALS (so relocated bindings take effect)
 -- ===========================================================================
-hl.unbind("SUPER + J")         -- relocated to SUPER+Y
-hl.unbind("SUPER + K")         -- relocated to SUPER+U
-hl.unbind("SUPER + L")         -- relocated to SUPER+Semicolon
+hl.unbind("SUPER + J") -- relocated to SUPER+Y
+hl.unbind("SUPER + K") -- relocated to SUPER+U
+hl.unbind("SUPER + L") -- relocated to SUPER+Semicolon
 hl.unbind("SUPER + SHIFT + L") -- relocated to SUPER+SHIFT+Z
 
 -- ===========================================================================
@@ -120,8 +128,11 @@ hl.bind("SUPER + U", hl.dsp.global("quickshell:oskToggle"), { description = "She
 hl.bind("SUPER + Semicolon", hl.dsp.exec_cmd("loginctl lock-session"), { description = "Session: Lock" })
 
 -- SUPER+SHIFT+L was: Sleep → moved to SUPER+SHIFT+Z
-hl.bind("SUPER + SHIFT + Z", hl.dsp.exec_cmd("systemctl suspend || loginctl suspend"),
-    { locked = true, description = "Session: Sleep" })
+hl.bind(
+	"SUPER + SHIFT + Z",
+	hl.dsp.exec_cmd("systemctl suspend || loginctl suspend"),
+	{ locked = true, description = "Session: Sleep" }
+)
 
 -- ===========================================================================
 -- NEW: VIM-STYLE WINDOW FOCUS (hjkl)
@@ -140,34 +151,41 @@ hl.bind("SUPER + ALT + J", hl.dsp.window.move({ direction = "d" }), { descriptio
 hl.bind("SUPER + ALT + K", hl.dsp.window.move({ direction = "u" }), { description = "Window: Move up" })
 hl.bind("SUPER + ALT + L", hl.dsp.window.move({ direction = "r" }), { description = "Window: Move right" })
 -- ===========================================================================
--- DICTATION (SUPER+ALT+V)
--- Toggle Handy speech-to-text from anywhere. Auto-launches with Large v3
--- on the RTX 2080 Ti when enough VRAM is free, otherwise CPU-only.
+-- DICTATION (SUPER+CTRL+W)
+-- Toggle Handy speech-to-text from anywhere. Starts hidden in the tray with
+-- Nemotron Streaming 3.5 and a CPU fallback when the 2080 Ti is unavailable.
 -- Logic lives in ~/.local/bin/handy-launch (see handy-launch.conf).
 -- ===========================================================================
-hl.bind("SUPER + ALT + V", hl.dsp.exec_cmd("~/.local/bin/handy-launch"),
-    { description = "Dictation: Toggle speech-to-text (auto-launch)" })
-
+hl.bind(
+	"SUPER + CTRL + W",
+	hl.dsp.exec_cmd("~/.local/bin/handy-launch"),
+	{ description = "Dictation: Toggle speech-to-text (auto-launch)" }
+)
 
 -- ===========================================================================
 -- NEW: WORKSPACE CYCLING ON CURRENT MONITOR (SUPER+[ / SUPER+])
 -- Cycles through workspaces on the same monitor in numeric order
 -- ===========================================================================
-hl.bind("SUPER + BracketLeft", function() cycleWorkspaceOnMonitor("prev") end,
-    { description = "Workspace: Previous on this monitor" })
-hl.bind("SUPER + BracketRight", function() cycleWorkspaceOnMonitor("next") end,
-    { description = "Workspace: Next on this monitor" })
+hl.bind("SUPER + BracketLeft", function()
+	cycleWorkspaceOnMonitor("prev")
+end, { description = "Workspace: Previous on this monitor" })
+hl.bind("SUPER + BracketRight", function()
+	cycleWorkspaceOnMonitor("next")
+end, { description = "Workspace: Next on this monitor" })
 
 -- ===========================================================================
 -- NEW: MOVE WORKSPACE TO SPECIFIC MONITOR (SUPER+SHIFT+hjkl)
 -- h=DP-1, j=HDMI-A-1, k=HDMI-A-2, l=none
 -- ===========================================================================
-hl.bind("SUPER + SHIFT + H", function() moveWorkspaceToMonitor("DP-1") end,
-    { description = "Workspace: Move to DP-1" })
-hl.bind("SUPER + SHIFT + J", function() moveWorkspaceToMonitor("HDMI-A-1") end,
-    { description = "Workspace: Move to HDMI-A-1" })
-hl.bind("SUPER + SHIFT + K", function() moveWorkspaceToMonitor("HDMI-A-2") end,
-    { description = "Workspace: Move to HDMI-A-2" })
+hl.bind("SUPER + SHIFT + H", function()
+	moveWorkspaceToMonitor("DP-1")
+end, { description = "Workspace: Move to DP-1" })
+hl.bind("SUPER + SHIFT + J", function()
+	moveWorkspaceToMonitor("HDMI-A-1")
+end, { description = "Workspace: Move to HDMI-A-1" })
+hl.bind("SUPER + SHIFT + K", function()
+	moveWorkspaceToMonitor("HDMI-A-2")
+end, { description = "Workspace: Move to HDMI-A-2" })
 
 -- ===========================================================================
 -- LEGACY BINDINGS (kept for arrow key / fn-layer compatibility)
