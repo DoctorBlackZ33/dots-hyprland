@@ -101,6 +101,7 @@ settings = store.get("settings")
 if not isinstance(settings, dict):
     settings = {}
 settings["settings_schema_version"] = 2
+settings["onboarding_completed"] = True
 settings["selected_model"] = os.environ["HANDY_MODEL"]
 settings["transcribe_accelerator"] = os.environ["HANDY_ACCEL"]
 if os.environ.get("HANDY_DEVICE"):
