@@ -139,6 +139,15 @@ hl.bind("SUPER + ALT + H", hl.dsp.window.move({ direction = "l" }), { descriptio
 hl.bind("SUPER + ALT + J", hl.dsp.window.move({ direction = "d" }), { description = "Window: Move down" })
 hl.bind("SUPER + ALT + K", hl.dsp.window.move({ direction = "u" }), { description = "Window: Move up" })
 hl.bind("SUPER + ALT + L", hl.dsp.window.move({ direction = "r" }), { description = "Window: Move right" })
+-- ===========================================================================
+-- DICTATION (SUPER+ALT+V)
+-- Toggle Handy speech-to-text from anywhere. Auto-launches with Large v3
+-- on the RTX 2080 Ti when enough VRAM is free, otherwise CPU-only.
+-- Logic lives in ~/.local/bin/handy-launch (see handy-launch.conf).
+-- ===========================================================================
+hl.bind("SUPER + ALT + V", hl.dsp.exec_cmd("~/.local/bin/handy-launch"),
+    { description = "Dictation: Toggle speech-to-text (auto-launch)" })
+
 
 -- ===========================================================================
 -- NEW: WORKSPACE CYCLING ON CURRENT MONITOR (SUPER+[ / SUPER+])

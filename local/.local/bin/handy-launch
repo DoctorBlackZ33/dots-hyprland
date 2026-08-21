@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# handy-launch — global dictation hotkey handler (SUPER+ALT+V on DarkArch).
+#
+# Toggle-with-auto-launch:
+#   * Handy not running -> check free VRAM on the RTX 2080 Ti, select the
+#     highest-quality model/backend, launch the app, then start recording.
+#   * Handy already up -> just toggle recording (the model stays unchanged).
+#
+# Policy:
+#   * enough free 2080 Ti VRAM -> Whisper Large v3 on Vulkan/2080 Ti
+#   * otherwise -> Whisper Large v3 on CPU
+#
+# Tuning: $XDG_CONFIG_HOME/handy-launch.conf (the DarkArch device overlay
+# ships it under devices/DarkArch/.config/handy-launch.conf).
+
+set -u
+
+# --- Resolve the AppImage (version-agnostic) -------------------------------
+HANDY_DATA="${XDG_DATA_HOME:-$HOME/.local/share}/handy"
+HANDY_BIN=""
+for f in "$HANDY_DATA"/Handy_*.AppImage; do
+  if [ -x "$f" ]; then HANDY_BIN="$f"; break; fi
+done
+if [ -z "$HANDY_BIN" ]; then
+  echo "handy-launch: no Handy AppImage in $HANDY_DATA" >&2
+  exit 1
+fi
+
+# --- Machine tuning (device overlay conf) ----------------------------------
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/handy-launch.conf"
+[ -f "$CONF" ] && . "$CONF"
+
+: "${HANDY_GPU_NAME:=NVIDIA GeForce RTX 2080 Ti}"
+: "${HANDY_LARGE_VRAM_MB:=2048}"
+# Catalog id verified with Handy --list-models.
+: "${HANDY_MODEL_LARGE:=handy-computer/whisper-large-v3-gguf/whisper-large-v3-Q5_K_M.gguf}"
+
+# --- Already running? Toggle and exit. --------------------------------------
+# The AppImage rewrites argv[0]/comm to "handy" after exec, so match the
+# process name (post-exec) and the AppImage path (pre-exec window).
+if pgrep -x handy >/dev/null 2>&1 || pgrep -f 'Handy_.*\.AppImage' >/dev/null 2>&1; then
+  exec "$HANDY_BIN" --toggle-transcription
+fi
+
+# --- 2080 Ti free-VRAM probe -----------------------------------------------
+nvidia_free_mb=0
+if command -v nvidia-smi >/dev/null 2>&1; then
+  nvidia_free_mb="$(
+    nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null |
+      head -n1
+  )" || nvidia_free_mb=0
+  nvidia_free_mb="${nvidia_free_mb//[!0-9]/}"
+  [ -n "$nvidia_free_mb" ] || nvidia_free_mb=0
+fi
+
+# --- Tier decision -----------------------------------------------------------
+# The CPU path deliberately uses the same Large v3 model: fallback changes
+# the backend, not the requested transcription quality.
+model="$HANDY_MODEL_LARGE"
+accel=cpu
+device_index=""
+if [ "$nvidia_free_mb" -ge "$HANDY_LARGE_VRAM_MB" ]; then
+  candidate_index="$(
+    "$HANDY_BIN" --list-devices 2>&1 |
+      awk -v name="$HANDY_GPU_NAME" 'index($0, name) {
+        sub(/^.*index=/, "")
+        sub(/ .*/, "")
+        print
+        exit
+      }'
+  )"
+  case "$candidate_index" in
+    ''|*[!0-9]*) ;;
+    *) accel=gpu; device_index="$candidate_index" ;;
+  esac
+fi
+
+echo "handy-launch: tier=$([ "$accel" = gpu ] && echo "gpu:$device_index" || echo cpu) model=$model (nvidia free=${nvidia_free_mb}MiB)" >&2
+
+# --- Write the tier into the Handy settings store ---------------------------
+# Store format: tauri-plugin-store JSON, one "settings" key holding the
+# AppSettings object (see Handy src-tauri/src/settings.rs, get_settings).
+# The plugin resolves relative store paths against the app data directory
+# (~/.local/share/com.pais.handy), not the config directory.
+STORE="${XDG_DATA_HOME:-$HOME/.local/share}/com.pais.handy/settings_store.json"
+mkdir -p "$(dirname "$STORE")"
+HANDY_STORE="$STORE" HANDY_MODEL="$model" HANDY_ACCEL="$accel" HANDY_DEVICE="$device_index" python3 - <<'EOF'
+import json
+import os
+
+path = os.environ["HANDY_STORE"]
+try:
+    with open(path) as fh:
+        store = json.load(fh)
+    if not isinstance(store, dict):
+        store = {}
+except Exception:
+    store = {}
+
+settings = store.get("settings")
+if not isinstance(settings, dict):
+    settings = {}
+settings["settings_schema_version"] = 2
+settings["selected_model"] = os.environ["HANDY_MODEL"]
+settings["transcribe_accelerator"] = os.environ["HANDY_ACCEL"]
+if os.environ.get("HANDY_DEVICE"):
+    # Handy 0.9.5 stores the transcribe.cpp registry index as an integer.
+    settings["transcribe_gpu_device"] = int(os.environ["HANDY_DEVICE"])
+else:
+    settings.pop("transcribe_gpu_device", None)
+store["settings"] = settings
+
+with open(path, "w") as fh:
+    json.dump(store, fh, indent=2)
+    fh.write("\n")
+EOF
+
+# --- Launch, wait for the single-instance endpoint, start recording ---------
+LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/handy"
+mkdir -p "$LOG_DIR"
+# tauri-plugin-single-instance listens on <tempdir>/scoped_dirXXXXXX/
+# SingletonSocket (random dir per launch). Snapshot the existing sockets,
+# launch, and wait for a new one so --toggle-transcription reaches the first
+# instance.
+pre_sockets="$(ls -1d /tmp/scoped_dir*/SingletonSocket 2>/dev/null | sort)"
+setsid "$HANDY_BIN" >>"$LOG_DIR/app.log" 2>&1 &
+
+for _ in $(seq 1 150); do
+  cur_sockets="$(ls -1d /tmp/scoped_dir*/SingletonSocket 2>/dev/null | sort)"
+  [ "$cur_sockets" != "$pre_sockets" ] && break
+  sleep 0.2
+done
+
+exec "$HANDY_BIN" --toggle-transcription
