@@ -1,0 +1,309 @@
+#!/usr/bin/env bash
+# handy-launch — global dictation hotkey handler (SUPER+ALT+V on DarkArch).
+#
+# Toggle-with-auto-launch:
+#   * Handy not running -> start the fork build hidden in the tray, start
+#     recording, and route the default input away from other apps.
+#   * Handy already up -> stop recording, restore the previous default input,
+#     and leave Handy resident in the tray.
+#
+# "Running" means the app owns its single-instance DBus name
+# (com.pais.handy.SingleInstance). The fork uses DBus, not a socket, for
+# single-instance forwarding, so name ownership is the only reliable
+# readiness signal: a live process can still be mid-startup (name not yet
+# claimed) or mid-shutdown (name already released). Two launchers are
+# serialized with flock so rapid double-presses toggle deterministically.
+#
+# Model policy:
+#   whisper-large-v3 (F16) — the highest quality whisper model — always.
+#   The launcher requests the GPU and pins the 2080 Ti's transcribe device
+#   key; the fork binary's built-in VRAM gate then decides per session:
+#   enough free 2080 Ti VRAM at session start -> run on it, otherwise a
+#   strict CPU fallback.
+#
+# Audio policy:
+#   Handy is pinned to the physical microphone (HANDY_MICROPHONE), but only
+#   while the stored selection is still the system default — an explicit
+#   choice made in the Handy UI sticks. During recording, the launcher
+#   switches the *default* input to a silent temporary PipeWire/Pulse sink
+#   monitor. This keeps Handy's selected input alive while applications that
+#   follow the default source receive silence. The previous default is
+#   restored when the hotkey stops recording.
+#
+# Tuning: $XDG_CONFIG_HOME/handy-launch.conf (the DarkArch device overlay
+# ships it under devices/DarkArch/.config/handy-launch.conf).
+
+set -u
+
+# --- Serialize concurrent hotkey presses ------------------------------------
+# While one launcher is waiting for the app to become ready, a second press
+# must queue behind it; otherwise both instances race the same toggle.
+LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/handy"
+mkdir -p "$LOG_DIR"
+exec 200>"$LOG_DIR/launcher.lock"
+if ! flock -w 15 200; then
+  echo "handy-launch: previous hotkey handler still running; proceeding unlocked" >&2
+fi
+
+# --- Resolve the fork binary -------------------------------------------------
+HANDY_BIN="${HANDY_BIN:-$HOME/.local/bin/handy}"
+if [ ! -x "$HANDY_BIN" ]; then
+  echo "handy-launch: no handy binary at $HANDY_BIN" >&2
+  exit 1
+fi
+
+# --- Machine tuning (device overlay conf) ----------------------------------
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/handy-launch.conf"
+[ -f "$CONF" ] && . "$CONF"
+
+: "${HANDY_GPU_NAME:=NVIDIA GeForce RTX 2080 Ti}"
+: "${HANDY_MODEL:=handy-computer/whisper-large-v3-gguf/whisper-large-v3-F16.gguf}"
+: "${HANDY_MICROPHONE:=Razer Seiren Elite}"
+: "${HANDY_MUTE_SINK:=handy_muted_input}"
+: "${HANDY_MUTE_SOURCE:=${HANDY_MUTE_SINK}.monitor}"
+
+# Single-instance DBus well-known name (identifier + ".SingleInstance",
+# see tauri-plugin-single-instance; this build has no semver feature).
+HANDY_DBUS_NAME="com.pais.handy.SingleInstance"
+AUDIO_STATE="$LOG_DIR/input-route.state"
+
+# --- DBus / process probes ---------------------------------------------------
+if command -v busctl >/dev/null 2>&1; then
+  name_owned() {
+    busctl --user list --no-pager 2>/dev/null |
+      awk '{ print $1 }' | grep -qx "$HANDY_DBUS_NAME"
+  }
+else
+  echo "handy-launch: busctl unavailable; falling back to process checks" >&2
+  name_owned() {
+    pgrep -x handy >/dev/null 2>&1
+  }
+fi
+
+app_pid() {
+  pgrep -x handy | head -n 1
+}
+
+# Wait until the app owns its name (up to ~30s; covers cold start with
+# model catalog seeding and backend loading).
+wait_for_name() {
+  local i
+  for i in $(seq 1 150); do
+    name_owned && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
+start_app() {
+  # 200>&-: do not leak the launcher's flock fd to the app, or the lock
+  # stays held for the app's whole lifetime and every later press times out.
+  setsid "$HANDY_BIN" --start-hidden >>"$LOG_DIR/app.log" 2>&1 200>&- &
+}
+
+# --- Input route helpers ----------------------------------------------------
+restore_default_input() {
+  [ -f "$AUDIO_STATE" ] || return 0
+
+  old_source="$(sed -n '1p' "$AUDIO_STATE" 2>/dev/null || true)"
+  module_id="$(sed -n '2p' "$AUDIO_STATE" 2>/dev/null || true)"
+  if [ -n "$old_source" ]; then
+    pactl set-default-source "$old_source" 2>/dev/null ||
+      echo "handy-launch: could not restore default input $old_source" >&2
+  fi
+  case "$module_id" in
+    ''|*[!0-9]*) ;;
+    *) pactl unload-module "$module_id" >/dev/null 2>&1 || true ;;
+  esac
+  rm -f "$AUDIO_STATE"
+}
+
+mute_default_input() {
+  [ -f "$AUDIO_STATE" ] && return 0
+  command -v pactl >/dev/null 2>&1 || {
+    echo "handy-launch: pactl unavailable; input route unchanged" >&2
+    return 1
+  }
+
+  old_source="$(pactl get-default-source 2>/dev/null || true)"
+  [ -n "$old_source" ] || {
+    echo "handy-launch: no default input source to preserve" >&2
+    return 1
+  }
+
+  module_id=""
+  if ! pactl list short sinks 2>/dev/null |
+    awk -v name="$HANDY_MUTE_SINK" '$2 == name { found=1 } END { exit !found }'
+  then
+    module_id="$(
+      pactl load-module module-null-sink \
+        "sink_name=$HANDY_MUTE_SINK" \
+        "sink_properties=device.description=Handy-Muted-Input" 2>/dev/null || true
+    )"
+    case "$module_id" in
+      ''|*[!0-9]*)
+        echo "handy-launch: could not create silent input route" >&2
+        return 1
+        ;;
+    esac
+  fi
+
+  if ! pactl set-default-source "$HANDY_MUTE_SOURCE" 2>/dev/null; then
+    case "$module_id" in
+      ''|*[!0-9]*) ;;
+      *) pactl unload-module "$module_id" >/dev/null 2>&1 || true ;;
+    esac
+    echo "handy-launch: could not switch default input to $HANDY_MUTE_SOURCE" >&2
+    return 1
+  fi
+
+  printf '%s\n%s\n' "$old_source" "$module_id" >"$AUDIO_STATE"
+  echo "handy-launch: default input muted via $HANDY_MUTE_SOURCE" >&2
+}
+
+# --- Already running? Toggle and route input --------------------------------
+if name_owned; then
+  "$HANDY_BIN" --toggle-transcription
+  rc=$?
+  if [ -f "$AUDIO_STATE" ]; then
+    restore_default_input
+  else
+    # The user may have launched Handy manually; treat this toggle as start.
+    mute_default_input || true
+  fi
+  exit "$rc"
+fi
+
+# Not owned: either nothing is running, an instance is mid-startup (a
+# parallel launcher may be bringing it up), or a process is stuck without
+# its name. Give a startup up to 5s to claim the name; then require the
+# process to be gone before launching fresh.
+restore_default_input
+i=0
+while :; do
+  name_owned && {
+    # Another launcher won the race; toggle the app it brought up.
+    "$HANDY_BIN" --toggle-transcription
+    rc=$?
+    [ -f "$AUDIO_STATE" ] && restore_default_input || mute_default_input
+    exit "$rc"
+  }
+  [ -z "$(app_pid)" ] && break
+  [ "$i" -ge 25 ] && break
+  i=$((i + 1))
+  sleep 0.2
+done
+
+pid="$(app_pid)"
+if [ -n "$pid" ]; then
+  # Stuck without its name (claim failure or hung shutdown): replace it.
+  echo "handy-launch: handy pid $pid has no DBus name; replacing" >&2
+  kill "$pid" 2>/dev/null || true
+  i=0
+  while [ -n "$(app_pid)" ] && [ "$i" -lt 50 ]; do
+    i=$((i + 1))
+    sleep 0.2
+  done
+  pkill -9 -x handy 2>/dev/null || true
+  sleep 0.5
+fi
+
+# --- 2080 Ti device key + free-VRAM report ---------------------------------
+# The fork store takes the transcribe-cpp device key
+# ["<backend>","id","<PCI address>"]; the backend is Vulkan (this build has
+# no CUDA) and the address must be %04x:%02x:%02x.%x, so drop the domain
+# prefix from nvidia-smi's 8-digit domain. If the target GPU is absent the
+# pin is cleared and the fork's auto device selection takes over.
+device_json=""
+free_mb=0
+if command -v nvidia-smi >/dev/null 2>&1; then
+  gpu_row="$(
+    nvidia-smi --query-gpu=name,pci.bus_id,memory.free \
+      --format=csv,noheader,nounits 2>/dev/null |
+      awk -F', *' -v name="$HANDY_GPU_NAME" '$1 == name { print; exit }'
+  )"
+  if [ -n "$gpu_row" ]; then
+    bus_id="$(printf '%s\n' "$gpu_row" | cut -d, -f2)"
+    free_mb="$(printf '%s\n' "$gpu_row" | cut -d, -f3)"
+    domain="${bus_id%%:*}"
+    rest="${bus_id#*:}"
+    device_json="$(printf '["vulkan","id","%s"]' "${domain: -4}:$rest")"
+  else
+    echo "handy-launch: $HANDY_GPU_NAME not found; using auto GPU device selection" >&2
+  fi
+fi
+free_mb="${free_mb//[!0-9]/}"
+[ -n "$free_mb" ] || free_mb=0
+
+echo "handy-launch: model=$HANDY_MODEL gpu=${device_json:-auto} (nvidia free=${free_mb}MiB; fork VRAM gate picks gpu/cpu)" >&2
+
+# --- Write the model/accelerator/device policy into Handy's settings store --
+# Only the keys the launcher owns are touched; everything else (UI choices,
+# schema version) is left alone. The device key is written as a compact JSON
+# string — the fork compares it against serde_json::to_string verbatim.
+STORE="${XDG_DATA_HOME:-$HOME/.local/share}/com.pais.handy/settings_store.json"
+mkdir -p "$(dirname "$STORE")"
+HANDY_STORE="$STORE" HANDY_MODEL="$HANDY_MODEL" HANDY_DEVICE_JSON="$device_json" HANDY_MICROPHONE="$HANDY_MICROPHONE" python3 - <<'EOF'
+import json
+import os
+
+path = os.environ["HANDY_STORE"]
+try:
+    with open(path) as fh:
+        store = json.load(fh)
+    if not isinstance(store, dict):
+        store = {}
+except Exception:
+    store = {}
+
+settings = store.get("settings")
+if not isinstance(settings, dict):
+    settings = {}
+
+settings["selected_model"] = os.environ["HANDY_MODEL"]
+settings["transcribe_accelerator"] = "gpu"
+if os.environ.get("HANDY_DEVICE_JSON"):
+    settings["transcribe_gpu_device"] = os.environ["HANDY_DEVICE_JSON"]
+else:
+    settings.pop("transcribe_gpu_device", None)
+
+# Pin the physical mic only while the stored selection is still the system
+# default; an explicit choice made in the Handy UI sticks.
+current = settings.get("selected_microphone")
+if current is None or current == "" or current == "default":
+    settings["selected_microphone"] = os.environ["HANDY_MICROPHONE"]
+
+store["settings"] = settings
+
+with open(path, "w") as fh:
+    json.dump(store, fh, indent=2)
+    fh.write("\n")
+EOF
+
+# --- Launch hidden, wait for the DBus name, start recording -----------------
+start_app
+if ! wait_for_name; then
+  # Rare silent claim failure (observed once: process alive, name never
+  # claimed): replace the instance once and retry.
+  echo "handy-launch: app did not claim its DBus name; retrying" >&2
+  pkill -x handy 2>/dev/null || true
+  i=0
+  while [ -n "$(app_pid)" ] && [ "$i" -lt 50 ]; do
+    i=$((i + 1))
+    sleep 0.2
+  done
+  start_app
+  wait_for_name || {
+    echo "handy-launch: handy failed to become ready" >&2
+    exit 1
+  }
+fi
+
+"$HANDY_BIN" --toggle-transcription
+rc=$?
+if [ "$rc" -eq 0 ]; then
+  mute_default_input || true
+else
+  restore_default_input
+fi
+exit "$rc"

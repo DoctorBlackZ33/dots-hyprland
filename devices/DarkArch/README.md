@@ -12,7 +12,7 @@ Hardware-specific overlay for the DarkArch machine.
 
 Both LLM backends occupy their GPU's VRAM while a model is loaded, so
 anything else needing GPU memory must check for free VRAM at launch time.
-See `local/.local/bin/handy-launch` for the tiered selection it implements.
+See `local/.local/bin/handy-launch` for the launch-time GPU pin and VRAM fallback it implements.
 
 ## Deploy
 
@@ -22,5 +22,14 @@ system update --device DarkArch
 
 ## Overlay contents
 
-- `.config/handy-launch.conf` — GPU tiering for `handy-launch` (SUPER+ALT+V
-  dictation): PCI ids, VRAM thresholds, busy limit.
+- `.config/handy-launch.conf` — model, GPU pin, microphone, and mute routing for
+  `handy-launch` (SUPER+ALT+V dictation). The VRAM free/busy thresholds are built
+  into the fork binary (see App binary).
+
+## App binary
+
+The `handy` binary is built from the fork
+[DoctorBlackZ33/Handy](https://github.com/DoctorBlackZ33/Handy) (branch
+`deploy/full`), which adds a per-session VRAM gate (use the pinned NVIDIA GPU
+when enough VRAM is free at session start, otherwise strict CPU), `--model` /
+`--quit` CLI overrides, and a CPU smoke test (`src-tauri/tests/whisper_smoke.rs`).
