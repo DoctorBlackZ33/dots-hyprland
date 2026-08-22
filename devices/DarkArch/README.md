@@ -12,7 +12,7 @@ Hardware-specific overlay for the DarkArch machine.
 
 Both LLM backends occupy their GPU's VRAM while a model is loaded, so
 anything else needing GPU memory must check for free VRAM at launch time.
-See `local/.local/bin/handy-launch` for the tiered selection it implements.
+See `local/.local/bin/handy-launch` for the launch and device-pinning logic.
 
 ## Deploy
 
@@ -22,5 +22,7 @@ system update --device DarkArch
 
 ## Overlay contents
 
-- `.config/handy-launch.conf` — GPU tiering for `handy-launch` (SUPER+ALT+V
-  dictation): PCI ids, VRAM thresholds, busy limit.
+- `.config/handy-launch.conf` — per-machine tuning for `handy-launch`
+  (SUPER+ALT+V dictation): model ID, 2080 Ti GPU pin, microphone, mute
+  routing. The fork binary's built-in VRAM gate decides GPU vs CPU at each
+  session start.

@@ -177,6 +177,19 @@ hl.bind("SUPER + SHIFT + K", function()
 end, { description = "Workspace: Move to HDMI-A-2" })
 
 -- ===========================================================================
+-- DICTATION (SUPER+ALT+V)
+-- Toggle Handy speech-to-text from anywhere. The launcher auto-starts the
+-- fork build hidden in the tray (whisper-large-v3 F16); the fork's VRAM
+-- gate uses the 2080 Ti when enough VRAM is free and falls back to CPU.
+-- Logic lives in ~/.local/bin/handy-launch (see handy-launch.conf).
+-- ===========================================================================
+hl.bind(
+	"SUPER + ALT + V",
+	hl.dsp.exec_cmd("~/.local/bin/handy-launch"),
+	{ description = "Dictation: Toggle speech-to-text (auto-launch)" }
+)
+
+-- ===========================================================================
 -- LEGACY BINDINGS (kept for arrow key / fn-layer compatibility)
 -- Superseded by hjkl bindings above; remove when comfortable.
 -- ===========================================================================
